@@ -56,6 +56,9 @@ var mp_mode: OptionButton
 var pause_online: Label
 var pause_copy: Button
 var mp_stat: Label
+var upd_p: Control
+var upd_msg: Label
+var upd_btn: Button
 var mp_list: VBoxContainer
 var board_p: Control
 var board_l: Label
@@ -325,6 +328,13 @@ func _build_menu() -> void:
 	var ver := _label("Versión %s" % str(ProjectSettings.get_setting("application/config/version", "")), 14, Color(0.75, 0.78, 0.76), 3)
 	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(ver)
+	if game.updater:
+		game.updater.found.connect(func():
+			ver.text += "  ·  nueva versión %s disponible (MULTIJUGADOR > Actualizar)" % game.updater.latest
+			ver.add_theme_color_override("font_color", GOLD)
+			if mp_p and mp_p.visible:
+				show_update()
+		)
 	sync_settings()
 
 
@@ -947,6 +957,54 @@ func show_mp() -> void:
 	mp_p.visible = true
 	mp_stat.text = ""
 	mp_name.text = game.settings.get("name", "Jugador")
+	if game.updater and game.updater.newer and not game.updater.dismissed:
+		show_update()
+
+
+## "New version" window (updater.gd): online play needs the same version on every PC.
+func show_update() -> void:
+	var u = game.updater
+	if upd_p == null:
+		upd_p = _overlay()
+		upd_p.color = Color(0.01, 0.015, 0.015, 0.86)
+		var vb: VBoxContainer = upd_p.get_meta("box")
+		var t := _label("NUEVA VERSIÓN DISPONIBLE", 44, GOLD, 8)
+		t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(t)
+		upd_msg = _label("", 19, Color(0.92, 0.94, 0.93), 3)
+		upd_msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		upd_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		upd_msg.custom_minimum_size = Vector2(720, 0)
+		vb.add_child(upd_msg)
+		var row := HBoxContainer.new()
+		row.alignment = BoxContainer.ALIGNMENT_CENTER
+		row.add_theme_constant_override("separation", 16)
+		vb.add_child(row)
+		upd_btn = _button(row, "ACTUALIZAR", func():
+			upd_btn.disabled = true
+			upd_msg.text = "Descargando la versión %s..." % game.updater.latest
+			game.updater.download()
+		)
+		_button(row, "Más tarde", func():
+			game.updater.dismissed = true
+			upd_p.visible = false
+		, true)
+		u.progress.connect(func(done: int, total: int):
+			var pct := 100.0 * done / maxf(1.0, total)
+			upd_msg.text = "Descargando la versión %s...  %d %%  (%d / %d MB)
+Al terminar se abrirá el instalador y el juego se cerrará." % [game.updater.latest, int(pct), done / 1048576, total / 1048576]
+		)
+		u.failed.connect(func(msg: String):
+			upd_msg.text = msg
+			upd_btn.disabled = false
+		)
+	upd_msg.text = "Ya está disponible la versión %s (tienes la %s).
+Para jugar online todos necesitáis la misma versión.
+
+¿Actualizar ahora? Se descargará el instalador (%d MB), se abrirá y el juego se cerrará. Tu progreso se conserva." % [u.latest, u.current, maxi(1, u.installer_size / 1048576)]
+	upd_btn.disabled = u.downloading
+	upd_p.visible = true
+	root.move_child(upd_p, root.get_child_count() - 1)
 
 
 func mp_status(t: String) -> void:

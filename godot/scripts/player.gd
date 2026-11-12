@@ -4,6 +4,7 @@ extends CharacterBody3D
 
 const WM := preload("res://scripts/weapon_models.gd")
 const OPT := preload("res://scripts/optimize.gd")
+const FPA := preload("res://scripts/fp_arms.gd")
 const GRAV := 20.0
 const LEAN_DIST := 0.55
 
@@ -11,6 +12,7 @@ var game
 var head: Node3D
 var camera: Camera3D
 var holder: Node3D
+var fp_arms = null          # fp_arms.gd: Mixamo arms with IK (null = modelled hands)
 var shape: CollisionShape3D
 var cap: CapsuleShape3D
 var muzzle_light: OmniLight3D
@@ -156,7 +158,13 @@ func _ready() -> void:
 	var opd: Dictionary = preload("res://scripts/operators.gd").get_op(int(game.settings.get("op", 0)))
 	WM.glove_col = opd.glove
 	WM.sleeve_col = opd.sleeve
+	# real arms (operator's Mixamo body + IK) replace the modelled hands when available
+	WM.no_hands = FPA.available()
 	guns = [WM.rifle(), WM.shotgun(), WM.pistol(), WM.smg(), WM.sniper(), WM.lmg()]
+	WM.no_hands = false
+	if FPA.available():
+		fp_arms = FPA.new()
+		fp_arms.build(camera, opd.body, opd.tint)
 	for i in guns.size():
 		holder.add_child(guns[i].model)
 		guns[i].model.visible = i == 0
@@ -1190,6 +1198,8 @@ func _update_weapon(delta: float, hs: float) -> void:
 		g.flash.material_override.set_shader_parameter("spin", randf() * TAU)
 		g.flash.scale = Vector3.ONE * randf_range(0.8, 1.2)
 	muzzle_light.light_energy = 3.0 if flash_t > 0.0 else 0.0
+	if fp_arms:
+		fp_arms.update(g, g.model.visible and not inspect_on and alive)
 
 
 # ---------------------------------------------------------------- damage

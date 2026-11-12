@@ -20,6 +20,9 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
+# Descargas originales de Mixamo (FBX de cientos de MB; se convierten con herramientas/convertir_mixamo.gd)
+Animaciones/
+
 # Copias de seguridad locales
 backup_godot_*/
 repo_github/

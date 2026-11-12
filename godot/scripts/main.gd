@@ -65,6 +65,7 @@ const STREAKS := {3: ["uav", "UAV"], 5: ["bomber", "BOMBARDERO"], 7: ["heli", "H
 const StreaksScript := preload("res://scripts/streaks.gd")
 const NetScript := preload("res://scripts/net.gd")
 var net
+var updater           # updater.gd: GitHub release check / installer download
 var air
 var user_args: PackedStringArray
 
@@ -89,6 +90,9 @@ func _ready() -> void:
 	net.name = "Net"
 	net.game = self
 	add_child(net)
+	updater = preload("res://scripts/updater.gd").new()
+	updater.name = "Updater"
+	add_child(updater)
 	world = Node3D.new()
 	world.name = "World"
 	nav.add_child(world)
@@ -1523,6 +1527,7 @@ func _shot(kind: String, out: String) -> void:
 		player.global_position = Vector3(-3, 0.2, 7)
 		player.yaw = 0.35
 		player.pitch = 0.0
+		player.god = true
 		for p in [Vector3(-6, 0.3, -6), Vector3(-1.5, 0.3, -9), Vector3(2.5, 0.3, -4)]:
 			var s = SoldierScript.new()
 			s.game = self
@@ -1534,6 +1539,18 @@ func _shot(kind: String, out: String) -> void:
 		if kind in names:
 			player.test_switch(names.find(kind))
 			await get_tree().create_timer(0.5).timeout
+		if kind.begins_with("hip_") or kind.begins_with("reload_"):
+			player.test_switch(int(kind.get_slice("_", 1)))
+			player.aiming = false
+			await get_tree().create_timer(0.6).timeout
+			if kind.begins_with("reload_"):
+				player.test_reload(true)
+				await get_tree().create_timer(float(arg_value("--wait")) if arg_value("--wait") != "" else 0.7).timeout
+			player.aiming = false
+		if kind.begins_with("aim_"):
+			player.test_switch(int(kind.substr(4)))
+			player.aiming = true
+			await get_tree().create_timer(0.8).timeout
 		if kind == "scope":
 			player.test_switch(4)
 			player.aiming = true

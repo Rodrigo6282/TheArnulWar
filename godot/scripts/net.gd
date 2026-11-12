@@ -40,6 +40,7 @@ var alive_map := {}      # id -> alive (from the state stream)
 var respawn_t := 0.0
 var ended := false
 var status := ""
+const VSEP := ""
 
 # ---- LAN discovery: the host broadcasts a small UDP beacon every second; the MULTIJUGADOR
 # screen listens and lists every game found on the local network (no IP typing needed).
@@ -294,7 +295,8 @@ func leave() -> void:
 
 func _on_connected() -> void:
 	status = "Conectado. Esperando datos de la partida..."
-	rpc_id(1, "hello", my_name, int(game.settings.get("op", 0)))
+	# the game version travels after the name (same RPC signature as older versions)
+	rpc_id(1, "hello", my_name + VSEP + _version(), int(game.settings.get("op", 0)))
 
 
 func _on_failed() -> void:
@@ -328,6 +330,19 @@ func hello(player_name: String, op_i: int) -> void:
 	if not is_host:
 		return
 	var id := multiplayer.get_remote_sender_id()
+	# every PC must run the same version (the RPC tables differ between versions)
+	var their := ""
+	if VSEP in player_name:
+		their = player_name.get_slice(VSEP, 1)
+		player_name = player_name.get_slice(VSEP, 0)
+	if their != _version():
+		rpc_id(id, "zzz_bad_version", _version())
+		game.ui.feed_line("%s no pudo entrar: tiene otra versión del juego (%s)" % [player_name, their if their != "" else "antigua"], false)
+		get_tree().create_timer(1.0).timeout.connect(func():
+			if multiplayer.multiplayer_peer and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+				multiplayer.multiplayer_peer.disconnect_peer(id)
+		)
+		return
 	players[id] = _new_player(player_name, op_i)
 	rpc_id(id, "welcome", map_idx, gmode, team_kills, game.zm.snapshot_state() if game.zm else {})
 	rpc("sync_players", players)
@@ -857,3 +872,24 @@ func _gun_leader() -> String:
 			best = v
 			best_id = id
 	return "%s (arma %d)" % [players[best_id].name, mini(int(players[best_id].lvl) + 1, GUN_LADDER.size())] if players.has(best_id) else "-"
+
+
+func _version() -> String:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--netver="):     # test: pretend another version in the handshake
+			return a.get_slice("=", 1)
+	return str(ProjectSettings.get_setting("application/config/version", ""))
+
+
+## Host rejected us: different game version. Kept as the last RPC of the file (and sorted last by
+## name) so adding it doesn't shift the ids of the older RPCs.
+@rpc("authority", "reliable")
+func zzz_bad_version(host_ver: String) -> void:
+	leave()
+	game.to_menu()
+	game.ui.show_mp()
+	var msg := "La partida usa la versión %s y tú tienes la %s. Todos necesitáis la misma versión." % [host_ver, _version()]
+	if game.updater.newer:
+		msg += " Pulsa ACTUALIZAR."
+		game.ui.show_update()
+	game.ui.mp_status(msg)

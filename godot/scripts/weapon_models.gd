@@ -54,6 +54,20 @@ static func m_glove() -> ShaderMaterial: return wm(glove_col, 0.75, 0.0, 0.0, "l
 static func m_glove_pad() -> ShaderMaterial: return wm(Color(0.16, 0.145, 0.12), 0.75, 0.0, 0.0, "rubber")
 static func m_sleeve() -> ShaderMaterial: return wm(sleeve_col, 0.95, 0.0, 0.0, "fabric")
 static func m_cuff() -> ShaderMaterial: return wm(sleeve_col.darkened(0.3), 0.95, 0.0, 0.0, "fabric")
+## Sight window: see-through tinted glass (an opaque pane right in front of the eye blacks out the view).
+static var _glass: StandardMaterial3D
+static func glass() -> StandardMaterial3D:
+	if _glass == null:
+		_glass = StandardMaterial3D.new()
+		_glass.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_glass.albedo_color = Color(0.55, 0.8, 0.85, 0.1)
+		_glass.roughness = 0.05
+		_glass.metallic_specular = 0.9
+		_glass.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_glass.shadow_enabled = false
+	return _glass
+
+
 static func m_lens() -> ShaderMaterial: return wm(Color(0.9, 0.95, 1.0), 0.2, 0.0, 3.0)
 
 
@@ -317,6 +331,7 @@ static func sling(parent: Node3D, a: Vector3, b: Vector3, sag: float) -> void:
 ## Right hand on a pistol grip: c = grip centre, axis = grip up-axis, rg = grip half thickness,
 ## trig = 3 points for the index finger resting along the trigger.
 static func right_grip(g: Node3D, c: Vector3, axis: Vector3, rg: float, trig: Array, arm_dir: Vector3) -> void:
+	g.set_meta("rgrip", {"c": c, "axis": axis, "rad": rg})   # for the first-person arms (fp_arms.gd)
 	if no_hands:
 		return
 	var a := axis.normalized()
@@ -335,6 +350,7 @@ static func right_grip(g: Node3D, c: Vector3, axis: Vector3, rg: float, trig: Ar
 
 ## Left hand under a horizontal part (handguard / pump) whose axis runs along Z through `c`.
 static func left_guard(L: Node3D, c: Vector3, rad: float, arm_dir: Vector3, axis := Vector3(0, 0, -1)) -> void:
+	L.set_meta("lgrip", {"c": c, "axis": axis, "rad": rad})
 	if no_hands:
 		return
 	var ref := Vector3(0, -1, 0)
@@ -556,6 +572,7 @@ static func pistol() -> Dictionary:
 	left.position = Vector3(-0.03, -0.1, 0.02)
 	g.add_child(left)
 	var lc := gc - left.position
+	left.set_meta("lgrip", {"c": lc + Vector3(-0.012, 0.0, 0.0), "axis": ga, "rad": 0.03, "pistol": true})
 	var lens := [[0.042, 0.026, 0.021], [0.046, 0.028, 0.022], [0.043, 0.027, 0.021], [0.034, 0.021, 0.018]]
 	for i in 4:
 		finger_arc(left, lc + ga * (0.004 - i * 0.021), ga, Vector3.RIGHT, 0.044, 2.75, lens[i], 0.0086, -1.0)
@@ -618,7 +635,7 @@ static func smg() -> Dictionary:
 	for sx in [-1.0, 1.0]:
 		part(g, Vector3(0.005, 0.042, 0.055), dark, Vector3(0.019 * sx, 0.08, -0.06), Vector3.ZERO, 0.002)
 	part(g, Vector3(0.043, 0.006, 0.055), dark, Vector3(0, 0.103, -0.06), Vector3.ZERO, 0.002)
-	part(g, Vector3(0.033, 0.034, 0.002), wm(Color(0.25, 0.35, 0.4), 0.05, 0.8), Vector3(0, 0.08, -0.085), Vector3.ZERO, 0.0005)
+	part(g, Vector3(0.033, 0.034, 0.002), glass(), Vector3(0, 0.08, -0.085), Vector3.ZERO, 0.0005)
 	part(g, Vector3(0.003, 0.003, 0.002), wm(Color(1.0, 0.15, 0.1), 0.5, 0.0, 8.0), Vector3(0, 0.08, -0.06))
 	# side rails with covers, ambidextrous selector, pins, sling plate, light under the handguard
 	for sx in [-1.0, 1.0]:
