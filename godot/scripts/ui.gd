@@ -320,6 +320,9 @@ func _build_menu() -> void:
 	row2.alignment = BoxContainer.ALIGNMENT_CENTER
 	vb.add_child(row2)
 	_button(row2, "Salir", func(): game.get_tree().quit(), true)
+	var ver := _label("Versión %s" % str(ProjectSettings.get_setting("application/config/version", "")), 14, Color(0.75, 0.78, 0.76), 3)
+	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(ver)
 	sync_settings()
 
 

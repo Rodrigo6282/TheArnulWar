@@ -1,70 +1,40 @@
-﻿# Exporta la version Godot y construye su instalador en .\dist_godot
-#   powershell -ExecutionPolicy Bypass -File construir_instalador_godot.ps1
+﻿# Construye la version Godot de The Arnul War en .\dist_godot:
+#   TheArnulWar_v<version>_Instalador.exe  - instalador con asistente (Inno Setup)
+#   TheArnulWar_v<version>_Portable.zip    - juego sin instalar (exe + LEEME)
+#   TheArnulWar.exe                        - el juego exportado por Godot
+# Uso: powershell -ExecutionPolicy Bypass -File construir_instalador_godot.ps1
+# Requisitos: plantillas de exportacion de Godot 4.7.2 (en %APPDATA%\Godot\export_templates)
+#             e Inno Setup 6 (ISCC.exe).
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $godot = Join-Path $root 'herramientas\godot\Godot_v4.7.2-stable_win64_console.exe'
 $dist = Join-Path $root 'dist_godot'
+$iss = Join-Path $root 'instalador_godot\TheArnulWar.iss'
+
+# version: application/config/version de project.godot
+$ver = (Select-String -Path (Join-Path $root 'godot\project.godot') -Pattern '^config/version="(.+)"').Matches[0].Groups[1].Value
+if (-not $ver) { throw 'No se encuentra config/version en project.godot.' }
+
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+	Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) { throw 'No se encuentra Inno Setup 6 (ISCC.exe). Instalalo desde https://jrsoftware.org/isdl.php' }
+
+# carpeta de salida limpia (solo lo que genera este script)
 New-Item -ItemType Directory -Force $dist | Out-Null
+Get-ChildItem $dist -File | Remove-Item -Force
+
+# 1) exportar el juego
 $exeOut = Join-Path $dist 'TheArnulWar.exe'
-# borrar el exe anterior: si la exportacion falla (p. ej. faltan las plantillas) no se empaqueta uno viejo
-if (Test-Path $exeOut) { Remove-Item $exeOut -Force }
 & $godot --headless --path (Join-Path $root 'godot') --export-release 'Windows Desktop' $exeOut | Out-Null
-if (-not (Test-Path $exeOut)) { throw 'Godot no ha exportado el juego.' }
-# IExpress falla con espacios en las rutas: se construye en una carpeta temporal sin espacios
-$tmp = $env:TEMP; if ($tmp -match ' ') { $tmp = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($tmp).ShortPath }
-$build = Join-Path $tmp 'TAWGbuild'
-$pkg = Join-Path $build 'paquete'
-if (Test-Path $build) { Remove-Item $build -Recurse -Force }
-New-Item -ItemType Directory -Force $pkg | Out-Null
-Copy-Item $exeOut, (Join-Path $root 'icono.ico') $pkg
-Copy-Item (Join-Path $root 'instalador_godot\*') $pkg
-$files = @(Get-ChildItem $pkg -File | ForEach-Object Name)
-$target = Join-Path $build 'TheArnulWar_Godot_Instalador.exe'
-$fileLines = ''; $srcLines = ''
-for ($i = 0; $i -lt $files.Count; $i++) { $fileLines += "FILE$i=`"$($files[$i])`"`r`n"; $srcLines += "%FILE$i%=`r`n" }
-$sed = @"
-[Version]
-Class=IEXPRESS
-SEDVersion=3
-[Options]
-PackagePurpose=InstallApp
-ShowInstallProgramWindow=1
-HideExtractAnimation=0
-UseLongFileName=1
-InsideCompressed=0
-CAB_FixedSize=0
-CAB_ResvCodeSigning=0
-RebootMode=N
-InstallPrompt=%InstallPrompt%
-DisplayLicense=%DisplayLicense%
-FinishMessage=%FinishMessage%
-TargetName=%TargetName%
-FriendlyName=%FriendlyName%
-AppLaunched=%AppLaunched%
-PostInstallCmd=%PostInstallCmd%
-AdminQuietInstCmd=%AdminQuietInstCmd%
-UserQuietInstCmd=%UserQuietInstCmd%
-SourceFiles=SourceFiles
-[Strings]
-InstallPrompt=¿Quieres instalar The Arnul War (versión Godot) en este equipo?
-DisplayLicense=
-FinishMessage=The Arnul War (Godot) se ha instalado. Tienes el acceso directo en el escritorio y en el menú Inicio.
-TargetName=$target
-FriendlyName=The Arnul War (Godot) - Instalador
-AppLaunched=cmd /c instalar.bat
-PostInstallCmd=<None>
-AdminQuietInstCmd=cmd /c instalar.bat
-UserQuietInstCmd=cmd /c instalar.bat
-$fileLines[SourceFiles]
-SourceFiles0=$pkg\
-[SourceFiles0]
-$srcLines
-"@
-$sedPath = Join-Path $build 'instalador.sed'
-[System.IO.File]::WriteAllText($sedPath, $sed, [System.Text.Encoding]::GetEncoding(1252))
-Start-Process -FilePath (Join-Path $env:WINDIR 'System32\iexpress.exe') -ArgumentList '/N', '/Q', $sedPath -Wait
-if (-not (Test-Path $target)) { throw 'IExpress no ha generado el instalador.' }
-Copy-Item $target (Join-Path $dist 'TheArnulWar_Godot_Instalador.exe') -Force
-Copy-Item (Join-Path $root 'instalador_godot\LEEME.txt') $dist -Force
-Remove-Item $build -Recurse -Force
+if (-not (Test-Path $exeOut)) { throw 'Godot no ha exportado el juego (¿faltan las plantillas de exportacion 4.7.2?).' }
+
+# 2) instalador
+& $iscc /Q "/DAppVersion=$ver" $iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup ha fallado (codigo $LASTEXITCODE)." }
+
+# 3) version portatil
+$zip = Join-Path $dist "TheArnulWar_v${ver}_Portable.zip"
+Compress-Archive -Path $exeOut, (Join-Path $root 'instalador_godot\LEEME.txt') -DestinationPath $zip -CompressionLevel Optimal -Force
+
+Write-Host "The Arnul War v$ver listo en $dist"
 Get-ChildItem $dist -File | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}

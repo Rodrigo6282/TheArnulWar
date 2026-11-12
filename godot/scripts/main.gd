@@ -109,6 +109,7 @@ func _ready() -> void:
 	var pm := ShaderMaterial.new()
 	pm.shader = preload("res://shaders/post.gdshader")
 	pr.material = pm
+	post_mat = pm
 	post.add_child(pr)
 	var m := arg_value("--map")
 	load_map(int(m) if m != "" else clampi(settings.map, 0, WorldBuilder.MAPS.size() - 1))
@@ -211,6 +212,42 @@ func apply_env(d: Dictionary) -> void:
 	e.adjustment_saturation = d.sat
 	e.adjustment_contrast = d.con
 	fx.set_weather(d.weather)
+
+
+## Per-map "film look" and weather on surfaces:
+## sh/hi = shadow/highlight tint (split toning), amt = grading strength, curve = S-curve,
+## grain = film grain, wet = wet surfaces + puddles (world_pbr), snow = snow on upward faces.
+const LOOKS := {
+	"day": {"sh": Color(0.92, 0.98, 1.08), "hi": Color(1.06, 1.0, 0.92), "amt": 0.55, "curve": 0.22, "grain": 0.018, "wet": 0.3, "snow": 0.0},
+	"desert": {"sh": Color(0.9, 0.95, 1.1), "hi": Color(1.1, 0.98, 0.84), "amt": 0.7, "curve": 0.25, "grain": 0.02, "wet": 0.0, "snow": 0.0},
+	"snow": {"sh": Color(0.88, 0.96, 1.12), "hi": Color(1.0, 1.0, 1.03), "amt": 0.7, "curve": 0.18, "grain": 0.02, "wet": 0.0, "snow": 0.7},
+	# zombie maps (night/dusk): brighter exposure + ambient and lifted shadows so they stay readable
+	"dusk": {"sh": Color(0.82, 0.95, 1.0), "hi": Color(1.12, 0.94, 0.8), "amt": 0.75, "curve": 0.12, "grain": 0.025, "wet": 0.5, "snow": 0.0, "lift": 0.07, "exp": 1.6, "amb": 2.4},
+	"arctic": {"sh": Color(0.85, 0.97, 1.12), "hi": Color(0.98, 1.0, 1.05), "amt": 0.7, "curve": 0.12, "grain": 0.025, "wet": 0.0, "snow": 0.85, "lift": 0.05, "exp": 1.4, "amb": 1.6},
+	"graveyard": {"sh": Color(0.84, 1.04, 0.96), "hi": Color(1.02, 1.04, 0.9), "amt": 0.8, "curve": 0.12, "grain": 0.03, "wet": 0.55, "snow": 0.0, "lift": 0.055, "exp": 1.45, "amb": 1.8},
+	"night": {"sh": Color(0.86, 1.02, 1.0), "hi": Color(1.08, 1.0, 0.86), "amt": 0.75, "curve": 0.12, "grain": 0.03, "wet": 0.55, "snow": 0.0, "lift": 0.055, "exp": 1.45, "amb": 1.8},
+}
+var post_mat: ShaderMaterial
+
+
+func apply_look(env_id: String) -> void:
+	var lk: Dictionary = LOOKS.get(env_id, LOOKS.day)
+	RenderingServer.global_shader_parameter_set("wetness", float(lk.wet) if not has_arg("--dry") else 0.0)
+	RenderingServer.global_shader_parameter_set("snow_cover", float(lk.snow))
+	# extra exposure / ambient on top of the env values (apply_env runs first)
+	var e: Environment = env_node.environment
+	if not has_arg("--nolook"):
+		e.tonemap_exposure *= float(lk.get("exp", 1.0))
+		e.ambient_light_energy *= float(lk.get("amb", 1.0))
+	if post_mat:
+		post_mat.set_shader_parameter("lift", float(lk.get("lift", 0.0)) if not has_arg("--nolook") else 0.0)
+		var sh: Color = lk.sh
+		var hi: Color = lk.hi
+		post_mat.set_shader_parameter("shadow_tint", Vector3(sh.r, sh.g, sh.b))
+		post_mat.set_shader_parameter("high_tint", Vector3(hi.r, hi.g, hi.b))
+		post_mat.set_shader_parameter("grade_amount", float(lk.amt) if not has_arg("--nolook") else 0.0)
+		post_mat.set_shader_parameter("curve", float(lk.curve) if not has_arg("--nolook") else 0.0)
+		post_mat.set_shader_parameter("grain", float(lk.grain) if not has_arg("--nolook") else 0.0)
 
 
 func apply_quality() -> void:
@@ -316,6 +353,7 @@ func load_map(i: int) -> void:
 		ui.build_minimap(WorldBuilder.rects)
 	OPT.merge_world(world)
 	apply_env(WorldBuilder.ENVS[WorldBuilder.MAPS[i].env])
+	apply_look(WorldBuilder.MAPS[i].env)
 	_bake_nav()
 	map_dirty = false
 

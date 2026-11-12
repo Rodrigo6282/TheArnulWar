@@ -13,7 +13,32 @@ static func tex(id: String, kind: String) -> Texture2D:
 	return load("res://assets/tex/%s_%s.jpg" % [id, kind])
 
 
-static func pbr(id: String, tint := Color.WHITE, scale := 0.5, metal := 0.0, world_tri := true) -> StandardMaterial3D:
+const WORLD_SHADER := preload("res://shaders/world_pbr.gdshader")
+
+
+## World surface: photoscanned triplanar PBR with weather (wet / puddles / snow, shaders/world_pbr).
+static func pbr(id: String, tint := Color.WHITE, scale := 0.5, metal := 0.0, world_tri := true) -> Material:
+	if "--oldmat" in OS.get_cmdline_user_args():
+		return pbr_std(id, tint, scale, metal, world_tri)
+	var key := "w|%s|%s|%s|%s|%s" % [id, tint.to_html(), scale, metal, world_tri]
+	if _mats.has(key):
+		return _mats[key]
+	var m := ShaderMaterial.new()
+	m.shader = WORLD_SHADER
+	m.set_shader_parameter("tex_albedo", tex(id, "diff"))
+	m.set_shader_parameter("tex_normal", tex(id, "nor"))
+	m.set_shader_parameter("tex_rough", tex(id, "rough"))
+	m.set_shader_parameter("tint", tint)
+	m.set_shader_parameter("uv_scale", scale)
+	m.set_shader_parameter("metal", metal)
+	m.set_shader_parameter("world_tri", world_tri)
+	m.set_shader_parameter("porosity", 0.15 if id.begins_with("snow") else (1.0 - metal * 0.9))
+	_mats[key] = m
+	return m
+
+
+## Same look as pbr() but as a StandardMaterial3D (for code that tweaks its properties, e.g. leaves).
+static func pbr_std(id: String, tint := Color.WHITE, scale := 0.5, metal := 0.0, world_tri := true) -> StandardMaterial3D:
 	var key := "%s|%s|%s|%s|%s" % [id, tint.to_html(), scale, metal, world_tri]
 	if _mats.has(key):
 		return _mats[key]
@@ -39,7 +64,7 @@ static func leaves(c: Color, scale := 1.4) -> StandardMaterial3D:
 	var key := "leaf|%s|%s" % [c.to_html(), scale]
 	if _mats.has(key):
 		return _mats[key]
-	var m: StandardMaterial3D = pbr("forest_leaves_02", Color.WHITE, scale, 0.0, false).duplicate()
+	var m: StandardMaterial3D = pbr_std("forest_leaves_02", Color.WHITE, scale, 0.0, false).duplicate()
 	m.albedo_texture = null
 	m.albedo_color = c
 	m.normal_scale = 1.6
@@ -209,14 +234,15 @@ static func car(p: Node3D, x: float, z: float, rot: float, paint: Color, burning
 	cs.position.y = 0.8
 	root.add_child(cs)
 	# burnt wrecks get scanned rusty paint; intact cars a glossy clear-coated paint
-	var pm: StandardMaterial3D
+	var pm: Material
 	if burning:
 		pm = pbr("rusty_painted_metal", paint.lightened(0.5), 0.9, 0.5, false)
 	else:
-		pm = colm(paint, 0.35, 0.45)
-		pm.clearcoat_enabled = true
-		pm.clearcoat = 0.8
-		pm.clearcoat_roughness = 0.15
+		var paint_m := colm(paint, 0.35, 0.45)
+		paint_m.clearcoat_enabled = true
+		paint_m.clearcoat = 0.8
+		paint_m.clearcoat_roughness = 0.15
+		pm = paint_m
 	var glass := colm(Color(0.04, 0.05, 0.06), 0.05, 0.9)
 	var tire := colm(Color(0.07, 0.07, 0.07), 0.9)
 	mesh_node(root, SHP.rbox(Vector3(4.2, 0.7, 1.85), 0.22, 4), pm, Vector3(0, 0.66, 0))
@@ -390,7 +416,7 @@ static func sandbags(p: Node3D, walls: Array) -> void:
 		mm.set_instance_color(i, Color.from_hsv(0.11, rng.randf_range(0.25, 0.35), rng.randf_range(0.5, 0.62)))
 	var mat := pbr("clay_plaster", Color.WHITE, 2.0, 0.0, false)
 	mat = mat.duplicate()
-	mat.vertex_color_use_as_albedo = true
+	mat.set_shader_parameter("vcol", true)
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.material_override = mat

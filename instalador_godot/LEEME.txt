@@ -1,16 +1,29 @@
-﻿The Arnul War (versión Godot)
-=============================
+﻿The Arnul War - versión 1.2
+==========================
 
-Versión del juego hecha con el motor Godot 4.7. Es un programa normal de Windows:
-no necesita navegador ni conexión a internet.
+Shooter en primera persona hecho con el motor Godot 4.7. Es un programa normal de
+Windows: no necesita navegador ni conexión a internet (salvo para jugar online).
 
-Modos de juego:
-  Operación - oleadas de soldados en Ciudad Rota, Aldea del Desierto y Puerto Helado.
-  Zombis    - rondas en Pueblo Olvidado, Fábrica Abandonada, Base Ártica y Cementerio:
-              gana puntos, retira
-              escombros para abrir zonas, compra armas en las paredes, bebe ventajas
-              (Blindaje, Manos rápidas, Pulso), mejora tu arma en la Forja (5000)
-              y prueba suerte con la caja misteriosa.
+
+NOVEDADES DE LA VERSIÓN 1.2
+---------------------------
+  - Multijugador con 4 modos: Todos contra todos, Duelo por equipos,
+    Juego de armas y Zombis cooperativo.
+  - Gráficos: color de película propio en cada mapa, suelos mojados con charcos
+    que reflejan las luces, nieve acumulada en los mapas nevados y piel nueva
+    para los zombis. Los mapas de zombis se ven más claros.
+  - Sonidos nuevos de pasos y de zombis.
+  - Los zombis estiran los brazos hacia delante.
+  - Instalador nuevo con asistente.
+
+
+MODOS DE JUEGO
+--------------
+Operación - oleadas de soldados en Ciudad Rota, Aldea del Desierto y Puerto Helado.
+Zombis    - rondas en Pueblo Olvidado, Fábrica Abandonada, Base Ártica y Cementerio:
+            gana puntos, retira escombros para abrir zonas, compra armas en las
+            paredes, bebe ventajas (Blindaje, Manos rápidas, Pulso), mejora tu arma
+            en la Forja (5000) y prueba suerte con la caja misteriosa.
 
 Armas: fusil, escopeta, pistola, subfusil, francotirador (con mira), ametralladora,
 cuchillo y granadas. Medallas por bajas y rachas: a las 3 bajas un UAV (dron que
@@ -18,18 +31,29 @@ marca a los enemigos), a las 5 un Bombardero y a las 7 un Helicóptero furtivo q
 dispara solo (B para usarlas; la racha se pierde si bajas de media vida).
 
 
-MULTIJUGADOR (duelo a muerte, todos contra todos)
-------------------------------------------------
+MULTIJUGADOR
+------------
 Menú principal > MULTIJUGADOR.
-  - Uno pulsa "CREAR PARTIDA" (elige el mapa).
+  - El anfitrión elige el MODO y el MAPA y pulsa "CREAR PARTIDA".
   - A los demás de la misma red (wifi o cable) les aparece sola en la lista
-    "PARTIDAS EN TU RED": solo tienen que pulsar "UNIRSE". Ya no hace falta
-    escribir la IP (sigue existiendo la opción "Unirse por IP" por si acaso).
-  - Gana el primero en llegar a 20 bajas.
+    "PARTIDAS EN TU RED": solo tienen que pulsar "UNIRSE" (también se puede
+    unir escribiendo la IP).
   - Tab muestra el marcador.
-  - En la misma red (wifi o cable) funciona directamente. La primera vez Windows
-    preguntará si permite la conexión: pulsa "Permitir acceso".
-  - Por internet: el host debe abrir el puerto 7777 UDP en su router, o todos usar
+
+  Todos contra todos  - cada uno por su cuenta; gana el primero en llegar a 20 bajas.
+  Duelo por equipos   - equipos Alfa y Bravo (se reparten solos); gana el primer
+                        equipo en llegar a 40 bajas. Los compañeros se ven en azul
+                        y no se les puede herir.
+  Juego de armas      - cada 2 bajas cambias de arma: fusil, subfusil, escopeta,
+                        ametralladora, francotirador y pistola. Gana quien complete
+                        la pistola. Una baja con cuchillo sube un nivel y se lo quita
+                        a la víctima.
+  Zombis cooperativo  - todos juntos contra las rondas en los mapas de zombis.
+                        Las puertas abiertas y los potenciadores son para todos. Si
+                        caes, vuelves al empezar la siguiente ronda.
+
+  - La primera vez Windows preguntará si permite la conexión: pulsa "Permitir acceso".
+  - Por internet: el anfitrión debe abrir el puerto 7777 UDP en su router, o todos usar
     una VPN de juegos gratuita (Radmin VPN, ZeroTier) y usar la IP que da la VPN.
 Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
 (Halcón, Espectro, Duna, Ártico, Cobra, Jaguar). Los demás jugadores te ven así.
@@ -37,12 +61,18 @@ Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
 
 INSTALAR
 --------
-Ejecuta "TheArnulWar_Godot_Instalador.exe" y responde "Sí".
-Se crea el acceso directo "The Arnul War (Godot)" en el escritorio y el menú Inicio.
-También puedes jugar sin instalar: haz doble clic en "TheArnulWar.exe".
+Ejecuta "TheArnulWar_v1.2_Instalador.exe" y sigue el asistente:
+  1. Elige la carpeta (la que propone ya está bien).
+  2. Marca si quieres acceso directo en el escritorio.
+  3. Pulsa "Instalar" y, al terminar, "Finalizar" para empezar a jugar.
+No necesita permisos de administrador. Si tenías una versión anterior instalada,
+se sustituye sola y se conserva tu progreso (récords, medallas y ajustes).
 
 Windows SmartScreen puede avisar porque el programa no está firmado:
 pulsa "Más información" y después "Ejecutar de todas formas".
+
+Sin instalar: descomprime "TheArnulWar_v1.2_Portable.zip" y haz doble clic en
+"TheArnulWar.exe".
 
 
 REQUISITOS
@@ -63,12 +93,14 @@ CONTROLES
 WASD moverse · Ratón mirar · Clic izquierdo disparar · Clic derecho apuntar
 Shift correr · Espacio saltar · C agacharse · Q / E inclinarse · R recargar
 1-6 o rueda cambiar de arma · V cuchillo · G granada · B usar racha
-F interactuar (zombis) · Esc pausa · Alt+Intro o F11 pantalla completa
+F interactuar (zombis) · Tab marcador (multijugador) · Esc pausa
+Alt+Intro o F11 pantalla completa
 
 
 DESINSTALAR
 -----------
-Configuración > Aplicaciones > Aplicaciones instaladas > The Arnul War (Godot).
+Configuración > Aplicaciones > Aplicaciones instaladas > The Arnul War > Desinstalar.
+Al final te pregunta si también quieres borrar tu progreso guardado.
 
 
 CRÉDITOS

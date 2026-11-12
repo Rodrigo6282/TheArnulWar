@@ -56,6 +56,7 @@ static func _init_assets() -> void:
 		"pants": [mk.call(Color(0.18, 0.2, 0.24)), mk.call(Color(0.28, 0.25, 0.2)), mk.call(Color(0.14, 0.14, 0.13))],
 		"blood": mk.call(Color(0.25, 0.02, 0.02), 0.35), "shoe": mk.call(Color(0.1, 0.09, 0.08)), "hair": mk.call(Color(0.12, 0.1, 0.08), 0.9),
 		"mouth": mk.call(Color(0.08, 0.02, 0.02), 0.5)}
+	_skin_look()
 	var eye := StandardMaterial3D.new()
 	eye.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	eye.albedo_color = Color(1.5, 0.75, 0.15)
@@ -64,6 +65,60 @@ static func _init_assets() -> void:
 		"neck": _cyl(0.06, 0.12), "head": _sphere(0.12), "jaw": _box(0.13, 0.05, 0.1), "eye": _sphere(0.012), "hair": _hemi(0.125),
 		"thigh": _cap(0.085, 0.48), "shin": _cap(0.07, 0.44), "shoe": _box(0.13, 0.1, 0.26), "upper": _cap(0.06, 0.32), "fore": _cap(0.05, 0.3),
 		"hand": _box(0.08, 0.1, 0.04), "stump": _cyl(0.065, 0.04)}
+
+
+## Dead skin: mottled bruises (detail albedo), fine bumps (noise normal map), light bleeding
+## through thin parts (backlight) and a pale waxy rim; blood is wet and glossy (clearcoat).
+## All cheap forward-shading features, no extra screen passes.
+static func _skin_look() -> void:
+	var fn := FastNoiseLite.new()
+	fn.seed = 913
+	fn.frequency = 0.06
+	fn.fractal_octaves = 4
+	var blot := NoiseTexture2D.new()
+	blot.width = 256
+	blot.height = 256
+	blot.seamless = true
+	blot.noise = fn
+	var ramp := Gradient.new()
+	# multiply-blend colours: bruised purple / sickly green / neutral
+	ramp.set_color(0, Color(0.8, 0.7, 0.78))
+	ramp.set_color(1, Color(1.0, 1.0, 1.0))
+	ramp.add_point(0.45, Color(0.9, 0.95, 0.85))
+	blot.color_ramp = ramp
+	var fb := FastNoiseLite.new()
+	fb.seed = 77
+	fb.frequency = 0.22
+	var bumps := NoiseTexture2D.new()
+	bumps.width = 256
+	bumps.height = 256
+	bumps.seamless = true
+	bumps.as_normal_map = true
+	bumps.bump_strength = 6.0
+	bumps.noise = fb
+	for s: StandardMaterial3D in M.skin:
+		s.detail_enabled = true
+		s.detail_blend_mode = BaseMaterial3D.BLEND_MODE_MUL
+		s.detail_albedo = blot
+		s.detail_uv_layer = BaseMaterial3D.DETAIL_UV_1
+		s.uv1_triplanar = true
+		s.uv1_scale = Vector3.ONE * 4.5
+		s.normal_enabled = true
+		s.normal_texture = bumps
+		s.normal_scale = 0.55
+		s.roughness = 0.52
+		s.rim_enabled = true
+		s.rim = 0.35
+		s.rim_tint = 0.6
+		s.backlight_enabled = true
+		s.backlight = Color(0.32, 0.06, 0.05)
+	var bl: StandardMaterial3D = M.blood
+	bl.roughness = 0.12
+	bl.metallic_specular = 0.75
+	bl.clearcoat_enabled = true
+	bl.clearcoat = 1.0
+	bl.clearcoat_roughness = 0.05
+	bl.albedo_color = Color(0.22, 0.015, 0.015)
 
 
 static func _box(x: float, y: float, z: float) -> Mesh:

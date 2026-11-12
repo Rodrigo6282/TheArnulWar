@@ -25,6 +25,8 @@ static func _mat_of(mi: MeshInstance3D) -> Material:
 
 ## Merge every static, visible single-surface mesh under `root` (whole map).
 static func merge_world(root: Node3D) -> int:
+	if "--nomergeworld" in OS.get_cmdline_user_args():
+		return 0
 	var groups := {}
 	var stack: Array = [root]
 	while not stack.is_empty():
