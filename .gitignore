@@ -3,7 +3,8 @@ dist/
 dist_godot/
 
 # Binarios del motor Godot (se descargan aparte)
-herramientas/
+herramientas/*
+!herramientas/Synth_sonidos.cs
 
 # Caché del editor de Godot
 godot/.godot/

@@ -53,7 +53,6 @@ var mp_name: LineEdit
 var mp_ip: LineEdit
 var mp_map: OptionButton
 var mp_mode: OptionButton
-var mp_sub: Label
 var mp_stat: Label
 var mp_list: VBoxContainer
 var board_p: Control
@@ -593,8 +592,11 @@ func _build_mp() -> void:
 	vb.add_child(t)
 	var sub := _label("", 16, Color(0.9, 0.92, 0.9), 3)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vb.add_child(sub)
-	mp_sub = sub
+	sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sub.custom_minimum_size = Vector2(640, 0)
+	var subc := CenterContainer.new()
+	subc.add_child(sub)
+	vb.add_child(subc)
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 16)
@@ -612,22 +614,32 @@ func _build_mp() -> void:
 	grid.add_child(_label("(cámbialo en el menú OPERADOR)", 15, Color(0.8, 0.82, 0.8)))
 	grid.add_child(_label("Modo de juego (host)", 17))
 	mp_mode = OptionButton.new()
-	mp_mode.add_item("Duelo a muerte", 0)
-	mp_mode.add_item("Zombis cooperativo", 1)
-	mp_mode.selected = 1 if game.settings.get("mp_mode", "dm") == "zombies" else 0
-	mp_mode.item_selected.connect(func(_i): _fill_mp_maps())
+	for mid in game.net.MODE_ORDER:
+		mp_mode.add_item(game.net.MODES[mid][0])
 	grid.add_child(mp_mode)
 	grid.add_child(_label("Mapa (host)", 17))
 	mp_map = OptionButton.new()
 	grid.add_child(mp_map)
-	_fill_mp_maps()
+	# the map list depends on the mode: zombie maps for co-op, Operación maps for the rest
+	var fill_maps := func():
+		var mid: String = game.net.MODE_ORDER[mp_mode.selected]
+		var want := "zombies" if mid == "zombies" else "ops"
+		mp_map.clear()
+		for i in WB.MAPS.size():
+			if WB.MAPS[i].mode == want:
+				mp_map.add_item(WB.MAPS[i].name, i)
+		sub.text = game.net.MODES[mid][1]
+		game.settings["mp_mode"] = mid
+	mp_mode.item_selected.connect(func(_i): fill_maps.call())
+	mp_mode.selected = maxi(0, game.net.MODE_ORDER.find(game.settings.get("mp_mode", "ffa")))
+	fill_maps.call()
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 12)
 	vb.add_child(row)
 	_button(row, "CREAR PARTIDA", func():
 		_save_mp()
-		var err: String = game.net.host(mp_name.text, mp_map.get_item_id(mp_map.selected), game.net.PORT, _mp_gmode())
+		var err: String = game.net.host(mp_name.text, mp_map.get_item_id(mp_map.selected), game.net.PORT, game.net.MODE_ORDER[mp_mode.selected])
 		mp_stat.text = err
 	)
 	# ---- games found on the local network (filled from net.lan_games)
@@ -835,31 +847,7 @@ func show_ops() -> void:
 	_refresh_preview()
 
 
-func _mp_gmode() -> String:
-	return "zombies" if mp_mode != null and mp_mode.selected == 1 else "dm"
-
-
-## Map list for the chosen multiplayer mode: Operación maps for deathmatch, Zombis maps for co-op.
-func _fill_mp_maps() -> void:
-	var gm := _mp_gmode()
-	var want := "zombies" if gm == "zombies" else "ops"
-	mp_map.clear()
-	for i in WB.MAPS.size():
-		if WB.MAPS[i].mode == want:
-			mp_map.add_item(WB.MAPS[i].name, i)
-	var last := int(game.settings.get("mp_map_" + gm, -1))
-	for k in mp_map.item_count:
-		if mp_map.get_item_id(k) == last:
-			mp_map.selected = k
-	if mp_sub:
-		mp_sub.text = ("Zombis cooperativo · hasta 8 jugadores contra las rondas · las puertas y los potenciadores se comparten"
-			if gm == "zombies" else "Duelo a muerte · todos contra todos · primero en llegar a 20 bajas")
-
-
 func _save_mp() -> void:
-	game.settings["mp_mode"] = _mp_gmode()
-	if mp_map.selected >= 0:
-		game.settings["mp_map_" + _mp_gmode()] = mp_map.get_item_id(mp_map.selected)
 	game.settings["name"] = mp_name.text.strip_edges() if mp_name.text.strip_edges() != "" else "Jugador"
 	mp_name.text = game.settings["name"]
 	game.settings["last_ip"] = mp_ip.text.strip_edges()
@@ -882,7 +870,7 @@ func _refresh_lan() -> void:
 		var g: Dictionary = games[uid]
 		var r := HBoxContainer.new()
 		r.add_theme_constant_override("separation", 14)
-		var info := _label("%s  ·  %s  ·  %s  ·  %d/%d jugadores" % [g.name, game.net.mode_name(g.get("mode", "dm")), g.map, g.n, g.max], 18, Color.WHITE, 3)
+		var info := _label("%s  ·  %s  ·  %d/%d jugadores" % [g.name, g.map, g.n, g.max], 18, Color.WHITE, 3)
 		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		info.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		r.add_child(info)
@@ -1036,6 +1024,9 @@ func _draw_minimap() -> void:
 			continue
 		var ex: float = e.global_position.x - px
 		var ez: float = e.global_position.z - pz
+		if e.get("puppet") == true and game.net.is_ally(e.peer_id):
+			mini.draw_circle(Vector2(ex, ez), 1.4, Color(0.35, 0.65, 1.0))
+			continue
 		var seen: bool = game.radar_t > 0.0
 		if not seen:
 			if e.get("rise_t") != null:
@@ -1062,7 +1053,7 @@ func _draw_radar() -> void:
 	var cam: Camera3D = game.player.camera
 	var a := 0.55 + 0.35 * sin(game.clock * 6.0)
 	for e in game.enemies:
-		if not is_instance_valid(e) or e.dead:
+		if not is_instance_valid(e) or e.dead or (e.get("puppet") == true and game.net.is_ally(e.peer_id)):
 			continue
 		var wp: Vector3 = e.global_position + Vector3(0, 1.9, 0)
 		if cam.is_position_behind(wp):
@@ -1202,14 +1193,12 @@ func tick(delta: float) -> void:
 	if board_p.visible:
 		board_l.text = game.net.board()
 	if game.mode == "mp":
-		var me: Dictionary = game.net.me()
-		var ld: Array = game.net.leader()
-		wave_l.text = "DUELO A MUERTE · %d jugadores\nTú %d bajas / %d muertes · Líder: %s (%d/%d)" % [game.net.players.size(), me.kills, me.deaths, ld[0], ld[1], game.net.KILL_GOAL]
+		wave_l.text = game.net.hud_line()
 	elif zm:
 		if zm.inter > 0.0 and zm.round_n > 0:
 			wave_l.text = "RONDA %d SUPERADA\nSiguiente en %ds" % [zm.round_n, ceili(zm.inter)]
 		elif zm.round_n > 0:
-			wave_l.text = "RONDA %d\n%d zombis restantes" % [zm.round_n, zm.left()]
+			wave_l.text = "RONDA %d\n%d zombis restantes" % [zm.round_n, game.alive_count() + zm.to_spawn]
 		else:
 			wave_l.text = ""
 	elif game.intermission > 0.0 and game.wave > 0:

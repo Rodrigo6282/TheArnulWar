@@ -29,59 +29,6 @@ var box_hold := 0.0
 var box_label: Label3D
 var round_kills := 0
 var box_guns := {}
-var remote_left := 0      # co-op client: zombies left this round, as reported by the host
-var drop_id := 0
-
-
-## Co-op client: the host runs rounds, spawns and zombie AI.
-func is_client() -> bool:
-	return game.net.active and not game.net.is_host
-
-
-## Zombies still to kill this round (HUD).
-func left() -> int:
-	return remote_left if is_client() else game.alive_count() + to_spawn
-
-
-## Every living player the zombies can go for: [{"n": node, "peer": id}] (peer 0 = local).
-func targets() -> Array:
-	var out := []
-	var pl = game.player
-	if pl != null and is_instance_valid(pl) and pl.alive:
-		out.append({"n": pl, "peer": 0})
-	if game.net.active:
-		for id in game.net.puppets:
-			var pp = game.net.puppets[id]
-			if pp != null and is_instance_valid(pp) and not pp.dead:
-				out.append({"n": pp, "peer": id})
-	return out
-
-
-## New round (host: local; clients: from the host's message).
-func begin_round(r: int, total: int) -> void:
-	round_n = r
-	round_kills = 0
-	drops_round = 0
-	to_spawn = total
-	remote_left = total
-	spawn_t = 1.0
-	inter = 0.0
-	if game.player and is_instance_valid(game.player):
-		if not game.player.alive and game.net.active:
-			game.coop_respawn()
-		elif round_n > 1:
-			game.player.grenades = mini(game.player.grenades + 2, 4)
-	game.ui.notice("RONDA %d" % round_n, "Llegan %d zombis" % total, 3.0)
-	game.sfx.play("round", -1)
-	if round_n == 10:
-		game.award_medal("survivor")
-
-
-func end_round() -> void:
-	inter = 9.0
-	remote_left = 0
-	game.ui.notice("RONDA %d SUPERADA" % round_n, "La siguiente empieza en 9 segundos", 3.5)
-	game.sfx.play("wave")
 
 
 func setup(g) -> void:
@@ -104,31 +51,144 @@ func add_points(n: int) -> void:
 	game.score += v
 
 
+## Co-op: is this machine the one running the zombies? (always true offline)
+func is_host_side() -> bool:
+	return not game.net.is_coop() or game.net.is_host
+
+
 func on_hit(z, killed: bool, head: bool) -> void:
-	# co-op: a teammate's (or nobody's) hit — the teammate scores it on their side
-	var by: int = game.net.z_attacker if game.net.active else 0
-	if not killed:
-		if by == 0:
-			add_points(10)
+	var ctx: Dictionary = game.kill_ctx
+	var pts := 10
+	if killed:
+		pts = 60
+		if ctx.get("melee", false):
+			pts = 130
+		elif head:
+			pts = 100
+		round_kills += 1
+		# power-up drop
+		if drops_round < 4 and randf() < 0.035:
+			drops_round += 1
+			var kind: String = DROPS.keys()[randi() % DROPS.size()]
+			drop_seq += 1
+			spawn_drop(z.global_position, kind, drop_seq)
+			game.net.zdrop(drop_seq, z.global_position, kind)
+	var who: int = z.attacker
+	if who != 0 and who != game.net.my_id():
+		# the client applies its own Doble puntos (power-ups are shared by everybody)
+		game.net.zpoints(who, pts, killed, head)
+	else:
+		add_points(pts)
+
+
+var drop_seq := 0
+var drop_asked := {}
+var zombies_by_id := {}
+
+
+# ---------------------------------------------------------------- co-op (client side)
+func find_zombie(id: int):
+	var z = zombies_by_id.get(id)
+	if z != null and is_instance_valid(z):
+		return z
+	zombies_by_id.erase(id)
+	if is_host_side():
+		for e in game.enemies:
+			if is_instance_valid(e) and e.get("nid") == id:
+				return e
+	return null
+
+
+func client_spawn(id: int, pos: Vector3, fac: float, rnd: int, gait: int, spd: float):
+	var old = find_zombie(id)
+	if old != null:
+		return old
+	var z = ZombieScript.new()
+	z.game = game
+	z.round_n = rnd
+	z.remote = true
+	z.nid = id
+	game.add_child(z)
+	z.gait_kind = gait
+	z.speed = spd
+	z.global_position = pos
+	z.net_pos = pos
+	z.facing = fac
+	z.net_facing = fac
+	z.net_seen = game.clock
+	game.enemies.append(z)
+	zombies_by_id[id] = z
+	return z
+
+
+func client_snapshot(arr: Array, rnd: int, left: int, it: float) -> void:
+	to_spawn = left
+	inter = it
+	if rnd != round_n:
+		client_round(rnd, left)
+	for a in arr:
+		var z = find_zombie(int(a[0]))
+		if z == null:
+			z = client_spawn(int(a[0]), a[1], a[2], round_n, int(a[3]) & 3, 2.0)
+			z.rise_t = 0.0
+		if not z.dead:
+			z.net_apply(a[1], a[2], int(a[3]))
+	# zombies the host no longer reports (missed death message): remove them
+	for id in zombies_by_id.keys():
+		var z = zombies_by_id[id]
+		if is_instance_valid(z) and not z.dead and game.clock - z.net_seen > 2.0:
+			game.enemies.erase(z)
+			z.queue_free()
+			zombies_by_id.erase(id)
+
+
+func client_round(n: int, total: int) -> void:
+	if n == round_n:
 		return
-	if by == 0:
-		add_points(kill_points(head, bool(game.kill_ctx.get("melee", false))))
-	round_kills += 1
-	# power-up drop
-	if drops_round < 4 and randf() < 0.035:
-		drops_round += 1
-		var kind: String = DROPS.keys()[randi() % DROPS.size()]
-		drop_id += 1
-		var p: Vector3 = z.global_position
-		if game.net.active:
-			game.net.rpc("z_drop", drop_id, kind, p)
-		_spawn_drop(p, kind, drop_id)
+	round_n = n
+	round_kills = 0
+	if n > 1 and game.player:
+		game.player.grenades = mini(game.player.grenades + 2, 4)
+	game.ui.notice("RONDA %d" % n, "Llegan %d zombis" % total, 3.0)
+	game.sfx.play("round", -1)
+	game.net.coop_round_start()
 
 
-static func kill_points(head: bool, melee: bool) -> int:
-	if melee:
-		return 130
-	return 100 if head else 60
+## For players joining a co-op game in progress.
+func snapshot_state() -> Dictionary:
+	var opened := []
+	for i in L.doors.size():
+		if L.doors[i].open:
+			opened.append(i)
+	return {"round": round_n, "doors": opened}
+
+
+func apply_state(s: Dictionary) -> void:
+	for i in s.get("doors", []):
+		open_door(int(i), false)
+	if int(s.get("round", 0)) > 0:
+		client_round(int(s.round), 0)
+
+
+func open_door(idx: int, broadcast: bool) -> void:
+	if idx < 0 or idx >= L.doors.size():
+		return
+	var r: Dictionary = L.doors[idx]
+	if r.open:
+		return
+	r.open = true
+	var n: Node3D = r.node
+	if is_instance_valid(n):
+		game.fx.puff(n.global_position + Vector3(0, 1.0, 0), Color(0.5, 0.45, 0.4), 2.0, 1.6, 0.3)
+		n.get_parent().remove_child(n)
+		n.queue_free()
+	for zid in r.zones:
+		active[zid] = true
+	game.map_dirty = true
+	game.sfx.play("door")
+	game.rebake_nav()
+	if broadcast:
+		game.net.zdoor(idx)
 
 
 # ---------------------------------------------------------------- rounds
@@ -138,16 +198,27 @@ func update(delta: float) -> void:
 	_update_drops(delta)
 	_update_box(delta)
 	_update_interact()
-	if is_client():
-		inter = maxf(0.0, inter - delta)
+	if not is_host_side():
+		if inter > 0.0:
+			inter = maxf(0.0, inter - delta)
 		return
 	if inter > 0.0:
 		inter -= delta
 		if inter <= 0.0:
-			var total := round_total(round_n + 1)
-			if game.net.active:
-				game.net.rpc("z_round", round_n + 1, total)
-			begin_round(round_n + 1, total)
+			round_n += 1
+			round_kills = 0
+			drops_round = 0
+			to_spawn = round_total(round_n)
+			spawn_t = 1.0
+			if round_n > 1:
+				game.player.grenades = mini(game.player.grenades + 2, 4)
+			game.ui.notice("RONDA %d" % round_n, "Llegan %d zombis" % to_spawn, 3.0)
+			game.sfx.play("round", -1)
+			if game.net.is_coop():
+				game.net.zround(round_n, to_spawn)
+				game.net.coop_round_start()
+			if round_n == 10:
+				game.award_medal("survivor")
 		return
 	if to_spawn > 0:
 		spawn_t -= delta
@@ -156,16 +227,26 @@ func update(delta: float) -> void:
 				to_spawn -= 1
 			spawn_t = maxf(0.35, 2.0 - round_n * 0.12)
 	elif game.alive_count() == 0:
-		if game.net.active:
-			game.net.rpc("z_round_end")
-		end_round()
+		inter = 9.0
+		game.ui.notice("RONDA %d SUPERADA" % round_n, "La siguiente empieza en 9 segundos", 3.5)
+		game.sfx.play("wave")
+		if game.net.is_coop():
+			game.net.rpc("zcleared", round_n)
 
 
 func _spawn_zombie() -> bool:
-	var tg := targets()
-	if tg.is_empty():
-		return false
-	var pp: Vector3 = tg[randi() % tg.size()].n.global_position
+	# spawn around a random living player (in co-op the zombies spread over the whole team)
+	var pp: Vector3 = game.player.global_position
+	if game.net.is_coop():
+		var cands_p := []
+		if game.player.alive:
+			cands_p.append(pp)
+		for id in game.net.puppets:
+			var mate = game.net.puppets[id]
+			if is_instance_valid(mate) and not mate.dead:
+				cands_p.append(mate.global_position)
+		if not cands_p.is_empty():
+			pp = cands_p[randi() % cands_p.size()]
 	var cands := []
 	var near := []
 	for zid in active.keys():
@@ -186,62 +267,8 @@ func _spawn_zombie() -> bool:
 	z.global_position = p + Vector3(randf_range(-0.8, 0.8), 0.15, randf_range(-0.8, 0.8))
 	z.facing = atan2(-(pp.x - p.x), -(pp.z - p.z))
 	game.enemies.append(z)
-	if game.net.active:
-		game.net.z_register(z)
+	game.net.zspawn(z)
 	return true
-
-
-## Client side: a zombie the host reported that we don't have yet.
-func spawn_replica(id: int, pos: Vector3, facing: float, gait: int, rise: float):
-	var z = ZombieScript.new()
-	z.game = game
-	z.round_n = maxi(round_n, 1)
-	z.remote = true
-	z.net_id = id
-	game.add_child(z)
-	z.collision_layer = 2
-	z.collision_mask = 0
-	z.gait_kind = gait
-	z.rise_t = rise
-	z.global_position = pos
-	z.net_pos = pos
-	z.facing = facing
-	z.rotation.y = facing
-	z.net_seen = game.clock
-	if rise <= 0.0:
-		z.B.root.position.y = 0.0
-	game.enemies.append(z)
-	return z
-
-
-## Remove a door's debris and open its zones (index into L.doors; also used by co-op sync).
-func open_door(idx: int, effects := true) -> void:
-	if idx < 0 or idx >= L.doors.size():
-		return
-	var r: Dictionary = L.doors[idx]
-	if r.open:
-		return
-	r.open = true
-	var n: Node3D = r.node
-	if is_instance_valid(n):
-		if effects:
-			game.fx.puff(n.global_position + Vector3(0, 1.0, 0), Color(0.5, 0.45, 0.4), 2.0, 1.6, 0.3)
-		n.get_parent().remove_child(n)
-		n.queue_free()
-	for zid in r.zones:
-		active[zid] = true
-	game.map_dirty = true
-	if effects:
-		game.sfx.play("door")
-	game.rebake_nav()
-
-
-func open_doors() -> Array:
-	var out := []
-	for i in L.doors.size():
-		if L.doors[i].open:
-			out.append(i)
-	return out
 
 
 # ---------------------------------------------------------------- interactables
@@ -310,10 +337,7 @@ func interact() -> void:
 		"door":
 			if not _pay(r.cost):
 				return
-			var idx: int = L.doors.find(r)
-			if game.net.active:
-				game.net.rpc("z_door", idx)
-			open_door(idx)
+			open_door(L.doors.find(r), true)
 		"buy":
 			var cost: int = r.cost / 2 if r.weapon in pl.owned else r.cost
 			if not _pay(cost):
@@ -435,7 +459,7 @@ func _update_box(delta: float) -> void:
 
 
 # ---------------------------------------------------------------- power-ups
-func _spawn_drop(pos: Vector3, kind: String, id := 0) -> void:
+func spawn_drop(pos: Vector3, kind: String, id := 0) -> void:
 	var n := Node3D.new()
 	game.world.add_child(n)
 	n.global_position = Vector3(pos.x, 0.9, pos.z)
@@ -487,7 +511,7 @@ func _spawn_drop(pos: Vector3, kind: String, id := 0) -> void:
 	lab.modulate = col.lightened(0.3)
 	lab.position.y = 0.55
 	n.add_child(lab)
-	drops.append({"node": n, "kind": kind, "t": 25.0, "id": id, "req": false})
+	drops.append({"node": n, "kind": kind, "t": 25.0, "id": id})
 	game.sfx.play3d("powerup", n.global_position, -2.0)
 
 
@@ -503,17 +527,13 @@ func _update_drops(delta: float) -> void:
 		n.get_child(0).position.y = sin(game.clock * 2.5) * 0.08
 		n.visible = d.t > 5.0 or fmod(d.t, 0.4) > 0.2
 		if pl and pl.alive and pl.global_position.distance_to(n.global_position - Vector3(0, 0.9, 0)) < 1.6:
-			if game.net.active:
-				# shared power-up: the host confirms the pickup and everyone gets it
-				if not d.req:
-					d.req = true
-					if game.net.is_host:
-						game.net.rpc("z_take", d.id)
-						take_drop(d.id)
-					else:
-						game.net.rpc_id(1, "z_take_req", d.id)
+			if game.net.is_coop():
+				# the host confirms the pickup and everybody gets the effect
+				if not drop_asked.has(d.id):
+					drop_asked[d.id] = true
+					game.net.zdrop_take(d.id)
 				continue
-			_apply_drop(d.kind)
+			_apply_drop(d.kind, true)
 			n.queue_free()
 			drops.erase(d)
 		elif d.t <= 0.0:
@@ -528,39 +548,36 @@ func has_drop(id: int) -> bool:
 	return false
 
 
-## Co-op: a shared power-up was picked up by someone.
-func take_drop(id: int) -> void:
+## Co-op: a power-up was picked up by someone (mine = by this player).
+func take_drop(id: int, mine: bool) -> void:
 	for d in drops.duplicate():
 		if d.id == id:
 			if is_instance_valid(d.node):
 				d.node.queue_free()
 			drops.erase(d)
-			_apply_drop(d.kind)
+			_apply_drop(d.kind, mine)
 			return
 
 
-func _apply_drop(kind: String) -> void:
+func _apply_drop(kind: String, mine := true) -> void:
 	game.sfx.play("powerup")
-	game.ui.notice(DROPS[kind][0], "", 2.0)
+	game.ui.notice(DROPS[kind][0], "" if mine else "Para todo el equipo", 2.0)
 	match kind:
 		"ammo":
-			game.player.max_ammo()
+			if game.player and game.player.alive:
+				game.player.max_ammo()
 		"insta":
 			insta_t = 20.0
 		"double":
 			double_t = 20.0
 		"nuke":
 			game.fx.flash_light(game.player.global_position + Vector3(0, 3, 0), 12.0, 60.0)
-			if not is_client():
-				# nobody gets credit for the bomb's kills (-1), only the flat bonus below
-				var prev: int = game.net.z_attacker
-				if game.net.active:
-					game.net.z_attacker = -1
+			if is_host_side():
 				for e in game.enemies.duplicate():
-					if is_instance_valid(e) and not e.dead and e.has_method("net_die"):
+					if is_instance_valid(e) and not e.dead and e.get("puppet") != true:
 						e.take_damage(1.0e7, false)
-				game.net.z_attacker = prev
-			add_points(400)
+			if mine:
+				add_points(400)
 
 
 func clear() -> void:

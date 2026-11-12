@@ -29,15 +29,15 @@ var seed := 0.0
 var agent: NavigationAgent3D
 var B := {}
 var mats: Array = []
-# co-op multiplayer: the host simulates every zombie; clients show "remote" replicas that
-# follow the host's state and forward damage to it
-var net_id := 0
+# co-op multiplayer: `nid` = network id given by the host; `remote` zombies (on clients)
+# only follow the host's snapshots; `attacker` = peer that is damaging it (host side).
+var nid := 0
 var remote := false
+var attacker := 0
 var net_pos := Vector3.ZERO
+var net_facing := 0.0
 var net_seen := 0.0
-var tgt = null            # player node being chased (local player or a teammate puppet)
-var tgt_peer := 0         # 0 = local player, otherwise the teammate's peer id
-var tgt_t := 0.0
+var swipe_seen := false
 
 static var M := {}
 static var ME := {}
@@ -216,12 +216,10 @@ func take_damage(d: float, head: bool) -> bool:
 	if dead:
 		return false
 	if remote:
-		# client replica: the host decides; the kill (and its points) comes back from it
+		# the host decides; show the flinch right away
 		hit_k = 1.0
 		hit_dir = -1.0 if randf() < 0.5 else 1.0
-		if game.zm:
-			game.zm.add_points(10)
-		game.net.z_send_hit(net_id, d, head, bool(game.kill_ctx.get("melee", false)))
+		game.net.zhit_send(nid, d, head)
 		return false
 	if game.zm and game.zm.insta_t > 0.0:
 		d = 99999.0
@@ -244,88 +242,64 @@ func _die(head: bool) -> void:
 	velocity = Vector3.ZERO
 	death_type = randi() % 2
 	if head and randf() < 0.65:
-		_lose_head()
-	game.sfx.play3d("zdie", global_position + Vector3(0, 1.4, 0), -4.0)
-	var by: int = game.net.z_attacker if game.net.active else 0
-	if by == 0:
+		headless = true
+		B.head.visible = false
+		B.stump.visible = true
+		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), Vector3.UP)
+		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), -transform.basis.z)
+	game.sfx.play3d("zdie%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -4.0)
+	if game.net.is_coop():
+		game.net.zdie(nid, head)
+	# kills by remote players are credited on their own machine (net.zpts)
+	if attacker == 0:
 		game.register_kill(head, self)
-	if game.net.active and game.net.is_host:
-		game.net.z_died(self, head, by)
 
 
-func _lose_head() -> void:
-	headless = true
-	B.head.visible = false
-	B.stump.visible = true
-	game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), Vector3.UP)
-	game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), -transform.basis.z)
+## Co-op client: the host confirmed this zombie died.
+func remote_die(head: bool) -> void:
+	attacker = -1   # credit (if it was ours) arrives separately via net.zpts
+	_die(head)
 
 
-## Client replica: the host confirmed this zombie's death.
-func net_die(lost_head: bool) -> void:
-	if dead:
-		return
-	dead = true
-	dead_t = 0.0
-	collision_layer = 0
-	collision_mask = 1
-	velocity = Vector3.ZERO
-	death_type = randi() % 2
-	if lost_head:
-		_lose_head()
-	game.sfx.play3d("zdie", global_position + Vector3(0, 1.4, 0), -4.0)
+## Co-op host: packed animation state for the snapshot (bits 0-1 gait, 2 attacking, 3 rising).
+func net_flags() -> int:
+	return gait_kind | (4 if attack_t > 0.0 else 0) | (8 if rise_t > 0.0 else 0)
 
 
-## Nearest living player: the local one or (co-op) a teammate.
-func _pick_target() -> void:
-	tgt = null
-	tgt_peer = 0
-	var best := INF
+## Co-op client: apply one snapshot entry.
+func net_apply(pos: Vector3, fac: float, flags: int) -> void:
+	net_pos = pos
+	net_facing = fac
+	net_seen = game.clock
+	gait_kind = flags & 3
+	var atk := (flags & 4) != 0
+	if atk and not swipe_seen:
+		attack_t = 0.7
+		game.sfx.play3d("zattack%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -3.0)
+	swipe_seen = atk
+	if (flags & 8) == 0 and rise_t > 0.0:
+		rise_t = minf(rise_t, 0.2)
+
+
+## Nearest living player (local or remote teammate) — zombies hunt everybody in co-op.
+func _target():
+	var best = null
+	var bd := 1.0e9
 	var pl = game.player
 	if pl != null and is_instance_valid(pl) and pl.alive:
-		tgt = pl
-		best = global_position.distance_squared_to(pl.global_position)
-	if game.net.active:
+		best = pl
+		bd = global_position.distance_squared_to(pl.global_position)
+	if game.net.is_coop():
 		for id in game.net.puppets:
 			var pp = game.net.puppets[id]
-			if pp == null or not is_instance_valid(pp) or pp.dead:
-				continue
-			var d := global_position.distance_squared_to(pp.global_position)
-			if d < best:
-				best = d
-				tgt = pp
-				tgt_peer = id
-
-
-func _remote_process(delta: float) -> void:
-	if rise_t > 0.0:
-		rise_t -= delta
-		var k := 1.0 - maxf(0.0, rise_t) / 1.6
-		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
-		B.root.rotation.z = sin(k * 9.0) * 0.12 * (1.0 - k)
-		_animate(delta, 0.0)
-		B.shL.rotation.x = 2.7 - k * 1.2
-		B.shR.rotation.x = 2.9 - k * 1.4
-	else:
-		B.root.position.y = 0.0
-		B.root.rotation.z = 0.0
-	var before := global_position
-	if global_position.distance_to(net_pos) > 5.0:
-		global_position = net_pos
-	else:
-		global_position = global_position.lerp(net_pos, 1.0 - exp(-12.0 * delta))
-	rotation.y = lerp_angle(rotation.y, facing, 1.0 - exp(-12.0 * delta))
-	if rise_t <= 0.0:
-		attack_t = maxf(0.0, attack_t - delta)
-		var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
-		_animate(delta, moved)
-	groan_t -= delta
-	if groan_t <= 0.0:
-		groan_t = randf_range(3.0, 8.0)
-		game.sfx.play3d(["zgroan1", "zgroan2", "zgroan3"][randi() % 3], global_position + Vector3(0, 1.5, 0), -6.0)
-	# the host stopped reporting it (missed death message): fade it out
-	if game.clock - net_seen > 2.0:
-		net_die(false)
+			if is_instance_valid(pp) and not pp.dead:
+				var d := global_position.distance_squared_to(pp.global_position)
+				if d < bd:
+					bd = d
+					best = pp
+	if best == null and pl != null and is_instance_valid(pl):
+		best = pl
+	return best
 
 
 func _exit_tree() -> void:
@@ -366,19 +340,18 @@ func _animate(delta: float, moved: float) -> void:
 	B.spine.rotation.x = -(lean * 0.5 + hit_k * -0.4)
 	B.chest.rotation = Vector3(-lean * 0.5 + sin(t * 2.0) * 0.04, -sn * 0.15 * g, hit_dir * hit_k * 0.3 + sin(t * 1.3) * 0.06)
 	B.neck.rotation = Vector3(0.25 + sin(t * 1.7) * 0.1, sin(t * 0.8) * 0.3, sin(t * 1.1) * 0.2)
-	# arms reach forward for the player (+X rotation swings the hanging arm towards -Z, the
-	# facing direction); the attack swipe raises them and claws down
-	var reach := 1.45 if gait_kind < 2 else 0.75
+	# arms reach for the player; attack swipe overrides
+	var reach := -1.35 if gait_kind < 2 else -0.6
 	var at := 0.0
 	if attack_t > 0.0:
 		at = sin((1.0 - attack_t / 0.7) * PI)
 	for sd in [-1, 1]:
 		var k := "L" if sd < 0 else "R"
 		var sw := sin(phase + (0.0 if sd < 0 else PI)) * (0.5 if gait_kind == 2 else 0.12) * g
-		var shx := reach + sw + sin(t * 2.3 + sd) * 0.08 + at * (0.9 if sd > 0 else 0.55)
-		# slightly inward so the hands reach towards the victim, not out to the sides
-		B["sh" + k].rotation = Vector3(shx, sd * 0.12, -sd * (0.08 + at * 0.35))
-		B["el" + k].rotation.x = 0.3 + sin(t * 1.9 + sd * 2.0) * 0.1 - at * 0.25
+		var shx := reach + sw + sin(t * 2.3 + sd) * 0.08 - at * (1.0 if sd > 0 else 0.6)
+		# the body faces -Z: a negative X rotation would swing the arm behind the back, so the sign is flipped
+		B["sh" + k].rotation = Vector3(-shx, 0, -sd * (0.15 + at * 0.6))
+		B["el" + k].rotation.x = 0.35 + at * 0.5
 
 
 func _death_anim() -> void:
@@ -399,7 +372,36 @@ func _death_anim() -> void:
 		r.rotation.x = (k2 * k2) * PI / 2 * 0.95
 
 
+func _remote_process(delta: float) -> void:
+	if rise_t > 0.0:
+		rise_t -= delta
+		var k := 1.0 - maxf(0.0, rise_t) / 1.6
+		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
+		_animate(delta, 0.0)
+		B.shL.rotation.x = 2.6 - k * 1.2
+		B.shR.rotation.x = 2.8 - k * 1.4
+		global_position = net_pos
+		return
+	B.root.position.y = 0.0
+	var before := global_position
+	if global_position.distance_to(net_pos) > 5.0:
+		global_position = net_pos
+	else:
+		global_position = global_position.lerp(net_pos, 1.0 - exp(-10.0 * delta))
+	facing = lerp_angle(facing, net_facing, 1.0 - exp(-10.0 * delta))
+	rotation.y = facing
+	if attack_t > 0.0:
+		attack_t -= delta
+	groan_t -= delta
+	if groan_t <= 0.0:
+		groan_t = randf_range(3.0, 8.0)
+		game.sfx.play3d("zgroan%d" % (randi() % 5 + 1), global_position + Vector3(0, 1.5, 0), -6.0)
+	var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
+	_animate(delta, moved)
+
+
 func _physics_process(delta: float) -> void:
+	var pl = _target()
 	if dead:
 		dead_t += delta
 		_death_anim()
@@ -411,18 +413,9 @@ func _physics_process(delta: float) -> void:
 	if remote:
 		_remote_process(delta)
 		return
-	tgt_t -= delta
-	if tgt_t <= 0.0 or tgt == null or not is_instance_valid(tgt) or (tgt_peer != 0 and tgt.dead) or (tgt_peer == 0 and not tgt.alive):
-		tgt_t = 0.5
-		_pick_target()
-	var pl = tgt
 	if pl == null or not is_instance_valid(pl):
-		# nobody left alive to chase: stand and sway
-		velocity = Vector3.ZERO
-		if rise_t <= 0.0:
-			_animate(delta, 0.0)
 		return
-	var pl_alive: bool = pl.alive if tgt_peer == 0 else not pl.dead
+	var pl_alive: bool = (not pl.dead) if pl.get("puppet") == true else pl.alive
 	# rising out of the ground
 	if rise_t > 0.0:
 		rise_t -= delta
@@ -430,9 +423,8 @@ func _physics_process(delta: float) -> void:
 		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
 		B.root.rotation.z = sin(k * 9.0) * 0.12 * (1.0 - k)
 		_animate(delta, 0.0)
-		# clawing up out of the ground: arms above the head and in front, lowering to the reach
-		B.shL.rotation.x = 2.7 - k * 1.2
-		B.shR.rotation.x = 2.9 - k * 1.4
+		B.shL.rotation.x = 2.6 - k * 1.2
+		B.shR.rotation.x = 2.8 - k * 1.4
 		return
 	B.root.position.y = 0.0
 	if not is_on_floor():
@@ -446,21 +438,21 @@ func _physics_process(delta: float) -> void:
 	groan_t -= delta
 	if groan_t <= 0.0:
 		groan_t = randf_range(3.0, 8.0)
-		game.sfx.play3d(["zgroan1", "zgroan2", "zgroan3"][randi() % 3], global_position + Vector3(0, 1.5, 0), -6.0)
+		game.sfx.play3d("zgroan%d" % (randi() % 5 + 1), global_position + Vector3(0, 1.5, 0), -6.0)
 	attack_cd -= delta
 	var mv := Vector3.ZERO
 	if attack_t > 0.0:
 		attack_t -= delta
 		if attack_t <= 0.35 and attack_t + delta > 0.35 and dist < 1.7 and pl_alive:
-			if tgt_peer == 0:
-				game.damage_player(40.0, global_position)
+			if pl.get("puppet") == true:
+				game.net.zombie_hit(pl.peer_id, 40.0, global_position)
 			else:
-				game.net.z_hurt(tgt_peer, 40.0, global_position)
+				game.damage_player(40.0, global_position)
 		facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 6.0))
 	elif dist < 1.3 and pl_alive and attack_cd <= 0.0:
 		attack_t = 0.7
 		attack_cd = 1.1
-		game.sfx.play3d("zattack", global_position + Vector3(0, 1.4, 0), -3.0)
+		game.sfx.play3d("zattack%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -3.0)
 	else:
 		repath_t -= delta
 		if dist < 5.0:

@@ -49,7 +49,7 @@ var last_shot := -99.0
 var puppet := false
 var peer_id := 0
 var display_name := ""
-var teammate := false     # co-op: shown with a green name tag
+var label_col := Color(1.0, 0.45, 0.35)
 var net_pos := Vector3.ZERO
 var net_yaw := 0.0
 var net_pitch := 0.0
@@ -192,7 +192,7 @@ func _ready() -> void:
 		lab.outline_size = 10
 		lab.pixel_size = 0.004
 		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		lab.modulate = Color(0.45, 1.0, 0.5) if teammate else Color(1.0, 0.45, 0.35)
+		lab.modulate = label_col
 		lab.position.y = 2.25
 		lab.no_depth_test = false
 		add_child(lab)
@@ -312,6 +312,9 @@ func take_damage(d: float, head: bool) -> bool:
 	if dead:
 		return false
 	if puppet:
+		# teammates (team deathmatch / co-op) can't be hurt
+		if game.net.is_ally(peer_id):
+			return false
 		# the owner of this player decides; damage is sent over the network
 		hit_k = 1.0
 		hit_dir = -1.0 if randf() < 0.5 else 1.0

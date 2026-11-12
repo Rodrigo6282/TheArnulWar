@@ -1,10 +1,5 @@
 extends Node
-## Multiplayer (ENet, host + clients). Two modes chosen by the host:
-##  - "dm": free-for-all deathmatch on the Operación maps.
-##  - "zombies": co-op Zombis. The host runs rounds and every zombie's AI and streams their
-##    state; clients show replicas and forward their hits. Doors and power-ups are shared,
-##    points / weapons / perks are per player. Fallen players come back at the next round;
-##    if everyone is down the match restarts.
+## Multiplayer (ENet, host + clients): free-for-all deathmatch on the Operación maps.
 ## Every peer simulates its own player; positions are streamed unreliably, hits/deaths/scores
 ## go reliably. Remote players are "puppet" soldiers that forward damage to their owner.
 
@@ -13,36 +8,38 @@ const WB := preload("res://scripts/world.gd")
 const PORT := 7777
 const SEND_HZ := 20.0
 const KILL_GOAL := 20
+const TEAM_GOAL := 40
 const RESPAWN_T := 3.0
+## Game modes: id -> [title, short description]
+const MODES := {
+	"ffa": ["TODOS CONTRA TODOS", "Cada uno por su cuenta · primero en llegar a 20 bajas gana"],
+	"tdm": ["DUELO POR EQUIPOS", "Equipo Alfa contra equipo Bravo · el primer equipo en llegar a 40 bajas gana"],
+	"gun": ["JUEGO DE ARMAS", "Cada baja te da un arma nueva · completa todas las armas para ganar · el cuchillo roba un nivel"],
+	"zombies": ["ZOMBIS COOPERATIVO", "Todos juntos contra las rondas de zombis · si caes, vuelves en la siguiente ronda"],
+}
+const MODE_ORDER := ["ffa", "tdm", "gun", "zombies"]
+## Gun game ladder (weapon indices from player.gd) and kills needed per weapon.
+const GUN_LADDER := [0, 3, 1, 5, 4, 2]
+const GUN_KILLS := 2
+const TEAM_NAMES := ["ALFA", "BRAVO"]
+const TEAM_COLS := [Color(0.35, 0.65, 1.0), Color(1.0, 0.45, 0.3)]
 
 var game
 var active := false
 var is_host := false
 var my_name := "Jugador"
 var map_idx := 0
+var gmode := "ffa"
+var team_kills := [0, 0]
+var zsend_t := 0.0
+var znext_id := 1
 var players := {}        # id -> {name, kills, deaths}
 var puppets := {}        # id -> soldier puppet node
 var send_t := 0.0
+var alive_map := {}      # id -> alive (from the state stream)
 var respawn_t := 0.0
 var ended := false
 var status := ""
-var gmode := "dm"        # "dm" deathmatch | "zombies" co-op
-# co-op zombies
-const ZSEND_HZ := 15.0
-var zombies := {}        # net id -> zombie (host: the real ones, client: replicas)
-var zdead := {}          # ids already dead (late state packets must not resurrect them)
-var znext := 0
-var zsend_t := 0.0
-var z_attacker := 0      # host: peer whose hit is being applied (0 = local, -1 = nobody)
-var z_melee := false
-
-
-func coop() -> bool:
-	return active and gmode == "zombies"
-
-
-func mode_name(m: String) -> String:
-	return "Zombis cooperativo" if m == "zombies" else "Duelo a muerte"
 
 # ---- LAN discovery: the host broadcasts a small UDP beacon every second; the MULTIJUGADOR
 # screen listens and lists every game found on the local network (no IP typing needed).
@@ -82,7 +79,7 @@ func _send_beacon() -> void:
 		beacon_udp = PacketPeerUDP.new()
 		beacon_udp.set_broadcast_enabled(true)
 	var pkt := JSON.stringify({"g": LAN_TAG, "id": host_uid, "name": my_name,
-		"map": WB.MAPS[map_idx].name, "mode": gmode,
+		"map": "%s · %s" % [WB.MAPS[map_idx].name, mode_title()],
 		"n": players.size(), "max": MAX_PLAYERS, "port": PORT}).to_utf8_buffer()
 	var dests := ["255.255.255.255", "127.0.0.1"]
 	for ip in local_ips():   # directed subnet broadcast too (some routers drop 255.255.255.255)
@@ -111,7 +108,7 @@ func _listen(_delta: float) -> void:
 		# same PC: the beacon also arrives via 127.0.0.1 — prefer the real LAN address
 		if not prev.is_empty() and ip == "127.0.0.1" and prev.ip != "127.0.0.1":
 			ip = prev.ip
-		var g := {"name": str(d.get("name", "?")).substr(0, 16), "map": str(d.get("map", "")), "mode": str(d.get("mode", "dm")),
+		var g := {"name": str(d.get("name", "?")).substr(0, 16), "map": str(d.get("map", "")),
 			"n": int(d.get("n", 1)), "max": int(d.get("max", MAX_PLAYERS)), "ip": ip,
 			"port": int(d.get("port", PORT)), "t": now}
 		if prev.is_empty() or prev.n != g.n or prev.ip != g.ip or prev.name != g.name:
@@ -148,9 +145,38 @@ static func local_ips() -> Array:
 
 
 # ---------------------------------------------------------------- host / join / leave
-func host(player_name: String, map_i: int, port := PORT, game_mode := "dm") -> String:
+func mode_title() -> String:
+	return MODES.get(gmode, MODES.ffa)[0]
+
+
+func is_coop() -> bool:
+	return active and gmode == "zombies"
+
+
+func team_of(id: int) -> int:
+	return int(players.get(id, {}).get("team", 0))
+
+
+## True when peer `id` is on the local player's team (team deathmatch only).
+func is_ally(id: int) -> bool:
+	if not active:
+		return false
+	if gmode == "zombies":
+		return true
+	return gmode == "tdm" and team_of(id) == team_of(my_id())
+
+
+func _new_player(pname: String, op_i: int) -> Dictionary:
+	# balance teams: join the smaller one
+	var n := [0, 0]
+	for id in players:
+		n[team_of(id)] += 1
+	return {"name": pname.substr(0, 16), "kills": 0, "deaths": 0, "op": op_i, "team": 0 if n[0] <= n[1] else 1, "lvl": 0, "lk": 0}
+
+
+func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa") -> String:
 	leave()
-	gmode = game_mode
+	gmode = mode_id if MODES.has(mode_id) else "ffa"
 	var peer := ENetMultiplayerPeer.new()
 	var err := peer.create_server(port, 8)
 	if err != OK:
@@ -163,7 +189,10 @@ func host(player_name: String, map_i: int, port := PORT, game_mode := "dm") -> S
 	ended = false
 	host_uid = "%d-%d" % [Time.get_ticks_usec(), randi()]
 	beacon_t = 0.0
-	players = {1: {"name": my_name, "kills": 0, "deaths": 0, "op": int(game.settings.get("op", 0)), "dead": false}}
+	team_kills = [0, 0]
+	znext_id = 1
+	players = {}
+	players[1] = _new_player(my_name, int(game.settings.get("op", 0)))
 	game.start_mp(map_idx)
 	return ""
 
@@ -187,13 +216,13 @@ func leave() -> void:
 		_remove_puppet(id)
 	puppets.clear()
 	players.clear()
-	reset_zombies()
 	if multiplayer.multiplayer_peer:
 		multiplayer.multiplayer_peer.close()
 	multiplayer.multiplayer_peer = null
 	active = false
 	is_host = false
 	ended = false
+	team_kills = [0, 0]
 
 
 func _on_connected() -> void:
@@ -224,8 +253,6 @@ func _on_peer_disconnected(id: int) -> void:
 	_remove_puppet(id)
 	if is_host:
 		rpc("sync_players", players)
-		if coop():
-			_coop_check()
 
 
 # ---------------------------------------------------------------- lobby RPCs
@@ -234,27 +261,24 @@ func hello(player_name: String, op_i: int) -> void:
 	if not is_host:
 		return
 	var id := multiplayer.get_remote_sender_id()
-	players[id] = {"name": player_name.substr(0, 16), "kills": 0, "deaths": 0, "op": op_i, "dead": false}
-	var doors: Array = game.zm.open_doors() if coop() and game.zm else []
-	var rnd: int = game.zm.round_n if coop() and game.zm else 0
-	rpc_id(id, "welcome", map_idx, gmode, doors, rnd)
+	players[id] = _new_player(player_name, op_i)
+	rpc_id(id, "welcome", map_idx, gmode, team_kills, game.zm.snapshot_state() if game.zm else {})
 	rpc("sync_players", players)
-	game.ui.feed_line("%s se unió a la partida" % player_name, true)
+	var tn := ""
+	if gmode == "tdm":
+		tn = " (equipo %s)" % TEAM_NAMES[players[id].team]
+	game.ui.feed_line("%s se unió a la partida%s" % [player_name, tn], true)
 
 
 @rpc("authority", "reliable")
-func welcome(map_i: int, game_mode: String, doors: Array, rnd: int) -> void:
+func welcome(map_i: int, mode_id: String, tk: Array, zstate: Dictionary) -> void:
 	map_idx = map_i
-	gmode = game_mode
+	gmode = mode_id
+	team_kills = tk
 	ended = false
 	game.start_mp(map_idx)
-	# co-op joined mid-game: catch up with the doors already opened and the current round
-	if coop() and game.zm:
-		for i in doors:
-			game.zm.open_door(int(i), false)
-		if rnd > 0:
-			game.zm.round_n = rnd
-			game.zm.inter = 0.0
+	if game.zm and not zstate.is_empty():
+		game.zm.apply_state(zstate)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -278,11 +302,14 @@ func update(delta: float) -> void:
 		send_t = 1.0 / SEND_HZ
 		var flags := (1 if pl.alive else 0) | (2 if pl.crouch > 0.5 else 0) | (4 if pl.aim_k > 0.5 else 0)
 		rpc("st", pl.global_position, pl.yaw, pl.pitch, flags, pl.cur)
-	if coop():
-		if is_host:
-			_send_zombies(delta)
-		return
-	if not pl.alive and not ended:
+	if is_host and gmode == "zombies" and game.zm:
+		zsend_t -= delta
+		if zsend_t <= 0.0:
+			zsend_t = 0.1
+			_send_zombies()
+		_check_coop_wipe()
+	# in co-op zombies a downed player waits for the next round (zmode calls coop_round_start)
+	if not pl.alive and not ended and gmode != "zombies":
 		respawn_t -= delta
 		if respawn_t <= 0.0:
 			game.mp_respawn()
@@ -294,8 +321,7 @@ func st(pos: Vector3, yaw: float, pitch: float, flags: int, wpn: int) -> void:
 	if not players.has(id) or game.state == "menu":
 		return
 	var alive := (flags & 1) != 0
-	if alive and players[id].get("dead", false):
-		players[id].dead = false
+	alive_map[id] = alive
 	var pp = puppets.get(id)
 	if pp != null and (not is_instance_valid(pp) or pp.dead):
 		if not alive:
@@ -324,18 +350,17 @@ func _spawn_puppet(id: int, pos: Vector3, yaw: float):
 	s.op = int(players[id].get("op", 0))
 	s.peer_id = id
 	s.display_name = players[id].name
-	s.teammate = coop()
+	if gmode == "tdm":
+		s.label_col = TEAM_COLS[team_of(id)]
+		s.display_name += "  [%s]" % TEAM_NAMES[team_of(id)]
+	elif gmode == "zombies":
+		s.label_col = TEAM_COLS[0]
 	game.add_child(s)
 	s.global_position = pos
 	s.facing = yaw
 	s.net_pos = pos
 	puppets[id] = s
-	if coop():
-		# teammates: not shootable, not counted as enemies, zombies can chase them
-		s.collision_layer = 0
-		s.collision_mask = 0
-	else:
-		game.enemies.append(s)
+	game.enemies.append(s)
 	return s
 
 
@@ -382,60 +407,132 @@ func fx_boom(pos: Vector3, radius: float) -> void:
 
 ## Called when this peer damages a remote player's puppet.
 func send_hit(victim: int, dmg: float, head: bool) -> void:
-	if active and players.has(victim):
-		rpc_id(victim, "hit", dmg, head, game.player.global_position if game.player else Vector3.ZERO)
+	if active and players.has(victim) and not is_ally(victim):
+		var melee: bool = bool(game.kill_ctx.get("melee", false)) if game.kill_ctx else false
+		rpc_id(victim, "hit", dmg, head, game.player.global_position if game.player else Vector3.ZERO, melee)
 
 
 @rpc("any_peer", "reliable")
-func hit(dmg: float, head: bool, from: Vector3) -> void:
+func hit(dmg: float, head: bool, from: Vector3, melee := false) -> void:
 	var pl = game.player
 	if pl == null or not pl.alive or ended:
 		return
-	last_attacker = multiplayer.get_remote_sender_id()
+	var from_id := multiplayer.get_remote_sender_id()
+	if gmode != "zombies" and is_ally(from_id):
+		return
+	last_attacker = from_id if gmode != "zombies" else 0
 	last_head = head
+	last_melee = melee
 	pl.take_damage(dmg, from)
 
 
 var last_attacker := 0
 var last_head := false
+var last_melee := false
+
+
+## Host only: a host-side zombie swiped at a remote player.
+func zombie_hit(victim: int, dmg: float, from: Vector3) -> void:
+	if active and players.has(victim):
+		rpc_id(victim, "hit", dmg, false, from, false)
 
 
 ## The local player died (from player.take_damage).
 func local_died() -> void:
 	respawn_t = RESPAWN_T
 	var killer := last_attacker
-	rpc("died", my_id(), killer, last_head)
+	rpc("died", my_id(), killer, last_head, last_melee)
 	last_attacker = 0
-	game.ui.notice("HAS CAÍDO", "Reapareces en %d segundos" % int(RESPAWN_T), RESPAWN_T)
+	last_melee = false
+	if gmode == "zombies":
+		game.ui.notice("HAS CAÍDO", "Vuelves al empezar la siguiente ronda · tus compañeros siguen luchando", 4.0)
+	else:
+		game.ui.notice("HAS CAÍDO", "Reapareces en %d segundos" % int(RESPAWN_T), RESPAWN_T)
 
 
 @rpc("any_peer", "call_local", "reliable")
-func died(victim: int, killer: int, head: bool) -> void:
+func died(victim: int, killer: int, head: bool, melee := false) -> void:
+	alive_map[victim] = false
 	if players.has(victim):
 		players[victim].deaths += 1
-	if killer != 0 and killer != victim and players.has(killer):
+	var valid_kill: bool = killer != 0 and killer != victim and players.has(killer)
+	if valid_kill:
 		players[killer].kills += 1
+		if gmode == "tdm":
+			team_kills[team_of(killer)] += 1
+		elif gmode == "gun":
+			_gun_progress(killer, victim, melee)
 	var vn: String = players[victim].name if players.has(victim) else "?"
 	var kn: String = players[killer].name if players.has(killer) else ""
-	if killer == 0 or killer == victim:
+	if gmode == "zombies":
+		game.ui.feed_line("%s ha caído" % vn, false)
+	elif not valid_kill:
 		game.ui.feed_line("%s se eliminó a sí mismo" % vn, false)
 	else:
-		game.ui.feed_line("%s eliminó a %s%s" % [kn, vn, "  (cabeza)" if head else ""], killer == my_id())
+		var how := "  (cabeza)" if head else ("  (cuchillo)" if melee else "")
+		game.ui.feed_line("%s eliminó a %s%s" % [kn, vn, how], killer == my_id())
 	var pp = puppets.get(victim)
 	if pp != null and is_instance_valid(pp) and not pp.dead:
 		pp.net_die(head)
-	if killer == my_id() and victim != killer:
+	if killer == my_id() and valid_kill:
 		game.register_kill(head, null)
 		game.ui.hitmarker(true)
-	if is_host and not ended and killer != 0 and players.has(killer) and players[killer].kills >= KILL_GOAL:
-		rpc("match_end", killer)
+	if is_host and not ended and valid_kill:
+		var won := -1
+		match gmode:
+			"ffa":
+				if players[killer].kills >= KILL_GOAL:
+					won = killer
+			"tdm":
+				if team_kills[team_of(killer)] >= TEAM_GOAL:
+					won = 1000 + team_of(killer)
+			"gun":
+				if int(players[killer].lvl) >= GUN_LADDER.size():
+					won = killer
+		if won >= 0:
+			rpc("match_end", won)
+
+
+## Gun game: the killer climbs the ladder; a knife kill also takes one level from the victim.
+func _gun_progress(killer: int, victim: int, melee: bool) -> void:
+	var k: Dictionary = players[killer]
+	k.lk = int(k.lk) + 1
+	if k.lk >= GUN_KILLS or melee:
+		k.lk = 0
+		k.lvl = int(k.lvl) + 1
+		if killer == my_id() and int(k.lvl) < GUN_LADDER.size():
+			game.gun_game_loadout(true)
+	if melee and players.has(victim):
+		var v: Dictionary = players[victim]
+		if int(v.lvl) > 0:
+			v.lvl = int(v.lvl) - 1
+			v.lk = 0
+			if victim == my_id():
+				game.ui.feed_line("¡Humillado! Bajas un nivel de arma", false)
+
+
+func gun_weapon(id: int) -> int:
+	return GUN_LADDER[clampi(int(players.get(id, {}).get("lvl", 0)), 0, GUN_LADDER.size() - 1)]
 
 
 @rpc("authority", "call_local", "reliable")
 func match_end(winner: int) -> void:
 	ended = true
-	var wn: String = players[winner].name if players.has(winner) else "?"
-	game.ui.notice("%s GANA LA PARTIDA" % wn.to_upper(), "Nueva partida en 10 segundos", 9.5)
+	var title := ""
+	if winner >= 1000:
+		var t := winner - 1000
+		title = "GANA EL EQUIPO %s" % TEAM_NAMES[t]
+		if t == team_of(my_id()):
+			title = "¡VICTORIA! " + title
+	elif winner < 0:
+		title = "LOS ZOMBIS HAN GANADO"
+	else:
+		var wn: String = players[winner].name if players.has(winner) else "?"
+		title = "%s GANA LA PARTIDA" % wn.to_upper()
+	var sub := "Nueva partida en 10 segundos"
+	if winner < 0 and game.zm:
+		sub = "Habéis sobrevivido %d rondas · %s" % [maxi(game.zm.round_n - 1, 0), sub]
+	game.ui.notice(title, sub, 9.5)
 	game.sfx.play("round")
 	if is_host:
 		get_tree().create_timer(10.0, false).timeout.connect(func():
@@ -443,6 +540,8 @@ func match_end(winner: int) -> void:
 				for id in players:
 					players[id].kills = 0
 					players[id].deaths = 0
+					players[id].lvl = 0
+					players[id].lk = 0
 				rpc("match_restart", players)
 		)
 
@@ -451,227 +550,180 @@ func match_end(winner: int) -> void:
 func match_restart(p: Dictionary) -> void:
 	players = p
 	ended = false
+	team_kills = [0, 0]
+	if gmode == "zombies":
+		# fresh map (closed doors) and round 1 for everyone
+		game.map_dirty = true
+		game.start_mp(map_idx)
+		return
 	game.mp_respawn()
-	game.ui.notice("DUELO A MUERTE", "Primero en llegar a %d bajas gana" % KILL_GOAL, 3.0)
+	game.ui.notice(mode_title(), MODES[gmode][1], 3.0)
 
 
 # ---------------------------------------------------------------- co-op zombies
-func reset_zombies() -> void:
-	zombies.clear()
-	zdead.clear()
-	znext = 0
-	z_attacker = 0
-	for id in players:
-		players[id].dead = false
+# The host owns every zombie (AI, rounds, damage). Clients see "remote" zombies that follow
+# a 10 Hz snapshot; their hits are sent to the host, which answers with points / deaths.
 
-
-## Host: a zombie was just spawned.
-func z_register(z) -> void:
-	znext += 1
-	z.net_id = znext
-	zombies[znext] = z
-
-
-func _send_zombies(delta: float) -> void:
-	zsend_t -= delta
-	if zsend_t > 0.0 or game.zm == null:
-		return
-	zsend_t = 1.0 / ZSEND_HZ
-	var a := PackedFloat32Array()
-	a.append(float(game.zm.left()))
-	for id in zombies.keys():
-		var z = zombies[id]
-		if z == null or not is_instance_valid(z) or z.dead:
-			zombies.erase(id)
-			continue
-		var p: Vector3 = z.global_position
-		a.append_array([float(id), p.x, p.y, p.z, z.facing, z.attack_t, float(z.gait_kind), maxf(z.rise_t, 0.0)])
-	rpc("z_st", a)
+func _send_zombies() -> void:
+	var arr := []
+	for e in game.enemies:
+		if is_instance_valid(e) and e.has_method("net_flags") and not e.dead:
+			arr.append([e.nid, e.global_position, e.facing, e.net_flags()])
+	var zm = game.zm
+	rpc("zsnap", arr, zm.round_n, zm.to_spawn, zm.inter)
 
 
 @rpc("authority", "unreliable_ordered")
-func z_st(a: PackedFloat32Array) -> void:
-	if game.zm == null or game.state == "menu" or a.size() < 1:
+func zsnap(arr: Array, round_n: int, to_spawn: int, inter: float) -> void:
+	if game.zm:
+		game.zm.client_snapshot(arr, round_n, to_spawn, inter)
+
+
+func zspawn(z) -> void:
+	if not is_coop() or not is_host:
 		return
-	game.zm.remote_left = int(a[0])
-	var i := 1
-	while i + 7 < a.size():
-		var id := int(a[i])
-		var pos := Vector3(a[i + 1], a[i + 2], a[i + 3])
-		var z = zombies.get(id)
-		if z == null or not is_instance_valid(z):
-			if not zdead.has(id):
-				z = game.zm.spawn_replica(id, pos, a[i + 4], int(a[i + 6]), a[i + 7])
-				zombies[id] = z
-		if z != null and is_instance_valid(z) and not z.dead:
-			z.net_pos = pos
-			z.facing = a[i + 4]
-			# start the swipe animation when the host's zombie starts it
-			if a[i + 5] > z.attack_t + 0.2:
-				z.attack_t = a[i + 5]
-				game.sfx.play3d("zattack", pos + Vector3(0, 1.4, 0), -3.0)
-			z.net_seen = game.clock
-		i += 8
-
-
-## Client: our bullet / knife / explosion hit a zombie replica.
-func z_send_hit(id: int, dmg: float, head: bool, melee: bool) -> void:
-	if active and not is_host:
-		rpc_id(1, "z_hit", id, dmg, head, melee)
-
-
-@rpc("any_peer", "reliable")
-func z_hit(id: int, dmg: float, head: bool, melee: bool) -> void:
-	if not is_host:
-		return
-	var z = zombies.get(id)
-	if z == null or not is_instance_valid(z) or z.dead:
-		return
-	z_attacker = multiplayer.get_remote_sender_id()
-	z_melee = melee
-	z.take_damage(dmg, head)
-	z_attacker = 0
-	z_melee = false
-
-
-## Host: a zombie died (by = killer peer, 0 = the host itself, -1 = nobody).
-func z_died(z, head: bool, by: int) -> void:
-	zombies.erase(z.net_id)
-	zdead[z.net_id] = true
-	var killer := my_id() if by == 0 else by
-	var melee: bool = z_melee if by > 0 else bool(game.kill_ctx.get("melee", false))
-	if killer > 0 and players.has(killer):
-		players[killer].kills += 1
-	rpc("z_die", z.net_id, head, z.headless, killer, melee)
+	z.nid = znext_id
+	znext_id += 1
+	rpc("zspawn_rpc", z.nid, z.global_position, z.facing, z.round_n, z.gait_kind, z.speed)
 
 
 @rpc("authority", "reliable")
-func z_die(id: int, head: bool, headless: bool, killer: int, melee: bool) -> void:
-	zdead[id] = true
-	var z = zombies.get(id)
-	zombies.erase(id)
-	if z != null and is_instance_valid(z):
-		z.net_die(headless)
-	if killer > 0 and players.has(killer):
-		players[killer].kills += 1
-	if killer == my_id() and game.zm:
-		game.zm.add_points(game.zm.kill_points(head, melee))
-		var hp: float = game.player.health if game.player else 100.0
-		game.kill_ctx = {"weapon": -1, "melee": melee, "last": false, "dist": 10.0, "hp": hp}
-		game.register_kill(head, z)
-		game.kill_ctx = {}
+func zspawn_rpc(nid: int, pos: Vector3, facing: float, rnd: int, gait: int, spd: float) -> void:
+	if game.zm:
+		game.zm.client_spawn(nid, pos, facing, rnd, gait, spd)
+
+
+## Client hit a remote zombie: the host applies the damage.
+func zhit_send(nid: int, dmg: float, head: bool) -> void:
+	var melee: bool = bool(game.kill_ctx.get("melee", false)) if game.kill_ctx else false
+	rpc_id(1, "zhit", nid, dmg, head, melee)
+
+
+@rpc("any_peer", "reliable")
+func zhit(nid: int, dmg: float, head: bool, melee: bool) -> void:
+	if not is_host or game.zm == null:
+		return
+	var z = game.zm.find_zombie(nid)
+	if z == null or z.dead:
+		return
+	z.attacker = multiplayer.get_remote_sender_id()
+	game.kill_ctx = {"melee": melee}
+	z.take_damage(dmg, head)
+	z.attacker = 0
+
+
+## Host: tell a client how many points it earned (and whether that was a kill).
+func zpoints(peer: int, pts: int, killed: bool, head: bool) -> void:
+	rpc_id(peer, "zpts", pts, killed, head)
+
+
+@rpc("authority", "reliable")
+func zpts(pts: int, killed: bool, head: bool) -> void:
+	if game.zm == null:
+		return
+	game.zm.add_points(pts)
+	if killed:
+		game.register_kill(head, null)
 		game.ui.hitmarker(true)
 
 
-## Host: a zombie clawed a teammate.
-func z_hurt(peer: int, dmg: float, from: Vector3) -> void:
-	if active and players.has(peer):
-		rpc_id(peer, "z_claw", dmg, from)
+func zdie(nid: int, head: bool) -> void:
+	if is_coop() and is_host:
+		rpc("zdie_rpc", nid, head)
 
 
 @rpc("authority", "reliable")
-func z_claw(dmg: float, from: Vector3) -> void:
-	if not ended:
-		game.damage_player(dmg, from)
+func zdie_rpc(nid: int, head: bool) -> void:
+	if game.zm:
+		var z = game.zm.find_zombie(nid)
+		if z != null and not z.dead:
+			z.remote_die(head)
 
 
 @rpc("authority", "reliable")
-func z_round(r: int, total: int) -> void:
-	if game.zm:
-		game.zm.begin_round(r, total)
+func zcleared(n: int) -> void:
+	game.ui.notice("RONDA %d SUPERADA" % n, "La siguiente empieza en 9 segundos", 3.5)
+	game.sfx.play("wave")
+
+
+func zround(n: int, total: int) -> void:
+	if is_coop() and is_host:
+		rpc("zround_rpc", n, total)
 
 
 @rpc("authority", "reliable")
-func z_round_end() -> void:
+func zround_rpc(n: int, total: int) -> void:
 	if game.zm:
-		game.zm.end_round()
+		game.zm.client_round(n, total)
 
 
-@rpc("any_peer", "reliable")
-func z_door(idx: int) -> void:
-	if game.zm:
-		game.zm.open_door(idx)
+## Round start: everybody that was down comes back.
+func coop_round_start() -> void:
+	var pl = game.player
+	if pl != null and is_instance_valid(pl) and not pl.alive and not ended:
+		game.mp_respawn(true)
+		game.ui.notice("¡DE VUELTA!", "Has vuelto a la lucha", 2.0)
 
 
-@rpc("authority", "reliable")
-func z_drop(id: int, kind: String, pos: Vector3) -> void:
-	if game.zm:
-		game.zm._spawn_drop(pos, kind, id)
-
-
-@rpc("any_peer", "reliable")
-func z_take_req(id: int) -> void:
-	if is_host and game.zm and game.zm.has_drop(id):
-		rpc("z_take", id)
-		game.zm.take_drop(id)
-
-
-@rpc("authority", "reliable")
-func z_take(id: int) -> void:
-	if game.zm:
-		game.zm.take_drop(id)
-
-
-## The local player went down in co-op.
-func coop_local_died() -> void:
-	rpc("coop_dead", my_id())
-	coop_dead(my_id())
-	game.ui.notice("HAS CAÍDO", "Vuelves al empezar la siguiente ronda si tu equipo sobrevive", 4.0)
-
-
-@rpc("any_peer", "reliable")
-func coop_dead(id: int) -> void:
-	if players.has(id):
-		players[id].dead = true
-		players[id].deaths += 1
-		if id != my_id():
-			game.ui.feed_line("%s ha caído" % players[id].name, false)
-	var pp = puppets.get(id)
-	if pp != null and is_instance_valid(pp) and not pp.dead:
-		pp.net_die(false)
-	if is_host:
-		_coop_check()
-
-
-## Host: if every player is down the match is over.
-func _coop_check() -> void:
-	if ended or not coop():
+func _check_coop_wipe() -> void:
+	if ended:
 		return
-	if game.player and is_instance_valid(game.player) and game.player.alive:
+	var pl = game.player
+	if pl == null or pl.alive:
 		return
 	for id in players:
-		if id != my_id() and not players[id].get("dead", false):
+		if id != my_id() and alive_map.get(id, true):
 			return
-	var rnd: int = game.zm.round_n if game.zm else 0
-	rpc("coop_over", rnd)
-	coop_over(rnd)
+	rpc("match_end", -1)
+
+
+## Debris removed by anyone: open it on every peer.
+func zdoor(idx: int) -> void:
+	if is_coop():
+		rpc("zdoor_rpc", idx)
+
+
+@rpc("any_peer", "reliable")
+func zdoor_rpc(idx: int) -> void:
+	if game.zm:
+		game.zm.open_door(idx, false)
+
+
+func zdrop(nid: int, pos: Vector3, kind: String) -> void:
+	if is_coop() and is_host:
+		rpc("zdrop_rpc", nid, pos, kind)
 
 
 @rpc("authority", "reliable")
-func coop_over(rnd: int) -> void:
-	ended = true
-	if rnd > game.best_round:
-		game.best_round = rnd
-		game.save_settings()
-	game.ui.notice("TODO EL EQUIPO HA CAÍDO", "Sobrevivisteis %d rondas · nueva partida en 10 segundos" % rnd, 9.5)
-	game.sfx.play("round")
+func zdrop_rpc(nid: int, pos: Vector3, kind: String) -> void:
+	if game.zm:
+		game.zm.spawn_drop(pos, kind, nid)
+
+
+## Someone touched a power-up: the host confirms it once and everybody gets it.
+func zdrop_take(nid: int) -> void:
 	if is_host:
-		get_tree().create_timer(10.0, false).timeout.connect(func():
-			if active and is_host and coop():
-				for id in players:
-					players[id].kills = 0
-					players[id].deaths = 0
-					players[id].dead = false
-				rpc("coop_restart", players)
-				coop_restart(players)
-		)
+		_zdrop_take_host(nid, my_id())
+	else:
+		rpc_id(1, "zdrop_take_rpc", nid)
+
+
+@rpc("any_peer", "reliable")
+func zdrop_take_rpc(nid: int) -> void:
+	_zdrop_take_host(nid, multiplayer.get_remote_sender_id())
+
+
+func _zdrop_take_host(nid: int, who: int) -> void:
+	if not is_host or game.zm == null or not game.zm.has_drop(nid):
+		return
+	rpc("zdrop_apply", nid, who)
+	zdrop_apply(nid, who)
 
 
 @rpc("authority", "reliable")
-func coop_restart(p: Dictionary) -> void:
-	players = p
-	ended = false
-	game.start_mp(map_idx)
+func zdrop_apply(nid: int, who: int) -> void:
+	if game.zm:
+		game.zm.take_drop(nid, who == my_id())
 
 
 # ---------------------------------------------------------------- HUD helpers
@@ -691,9 +743,50 @@ func me() -> Dictionary:
 
 func board() -> String:
 	var ids := players.keys()
-	ids.sort_custom(func(a, b): return players[a].kills > players[b].kills)
-	var t := "%-18s %6s %8s\n" % ["JUGADOR", "BAJAS", "MUERTES"]
+	if gmode == "gun":
+		ids.sort_custom(func(a, b): return int(players[a].lvl) * 10 + int(players[a].lk) > int(players[b].lvl) * 10 + int(players[b].lk))
+	else:
+		ids.sort_custom(func(a, b): return players[a].kills > players[b].kills)
+	var t := mode_title() + "\n"
+	if gmode == "tdm":
+		t += "ALFA %d  ·  BRAVO %d   (meta %d)\n" % [team_kills[0], team_kills[1], TEAM_GOAL]
+	t += "\n"
+	var extra := "EQUIPO" if gmode == "tdm" else ("ARMA" if gmode == "gun" else "")
+	t += "%-18s %6s %8s %10s\n" % ["JUGADOR", "BAJAS", "MUERTES", extra]
 	for id in ids:
 		var p: Dictionary = players[id]
-		t += "%-18s %6d %8d%s\n" % [p.name, p.kills, p.deaths, "   <" if id == my_id() else ""]
+		var ex := ""
+		if gmode == "tdm":
+			ex = TEAM_NAMES[team_of(id)]
+		elif gmode == "gun":
+			ex = "%d/%d" % [mini(int(p.lvl) + 1, GUN_LADDER.size()), GUN_LADDER.size()]
+		t += "%-18s %6d %8d %10s%s\n" % [p.name, p.kills, p.deaths, ex, "   <" if id == my_id() else ""]
 	return t
+
+
+## One-line HUD status for the current mode.
+func hud_line() -> String:
+	var m := me()
+	match gmode:
+		"tdm":
+			var mt := team_of(my_id())
+			return "DUELO POR EQUIPOS · Tu equipo: %s\nALFA %d  ·  BRAVO %d  (meta %d)" % [TEAM_NAMES[mt], team_kills[0], team_kills[1], TEAM_GOAL]
+		"gun":
+			var lvl := int(m.get("lvl", 0))
+			var wn: String = game.player.weapons[gun_weapon(my_id())].short if game.player else ""
+			return "JUEGO DE ARMAS · Arma %d/%d: %s (%d/%d bajas)\nLíder: %s" % [mini(lvl + 1, GUN_LADDER.size()), GUN_LADDER.size(), wn, int(m.get("lk", 0)), GUN_KILLS, _gun_leader()]
+		"zombies":
+			return ""
+	var ld: Array = leader()
+	return "TODOS CONTRA TODOS · %d jugadores\nTú %d bajas / %d muertes · Líder: %s (%d/%d)" % [players.size(), m.kills, m.deaths, ld[0], ld[1], KILL_GOAL]
+
+
+func _gun_leader() -> String:
+	var best_id := 0
+	var best := -1
+	for id in players:
+		var v := int(players[id].lvl) * 10 + int(players[id].lk)
+		if v > best:
+			best = v
+			best_id = id
+	return "%s (arma %d)" % [players[best_id].name, mini(int(players[best_id].lvl) + 1, GUN_LADDER.size())] if players.has(best_id) else "-"

@@ -6,6 +6,8 @@ $godot = Join-Path $root 'herramientas\godot\Godot_v4.7.2-stable_win64_console.e
 $dist = Join-Path $root 'dist_godot'
 New-Item -ItemType Directory -Force $dist | Out-Null
 $exeOut = Join-Path $dist 'TheArnulWar.exe'
+# borrar el exe anterior: si la exportacion falla (p. ej. faltan las plantillas) no se empaqueta uno viejo
+if (Test-Path $exeOut) { Remove-Item $exeOut -Force }
 & $godot --headless --path (Join-Path $root 'godot') --export-release 'Windows Desktop' $exeOut | Out-Null
 if (-not (Test-Path $exeOut)) { throw 'Godot no ha exportado el juego.' }
 # IExpress falla con espacios en las rutas: se construye en una carpeta temporal sin espacios

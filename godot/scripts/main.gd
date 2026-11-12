@@ -17,7 +17,7 @@ const DIFF_ACC := [0.6, 1.0, 1.35]
 const DIFF_DMG := [0.6, 1.0, 1.45]
 const BUY_NAMES := {0: "AR-7 FUSIL", 1: "M-12 ESCOPETA", 2: "P9 MUNICIÓN", 3: "V-9 SUBFUSIL", 4: "R-700 FRANCOTIRADOR", 5: "K-90 AMETRALLADORA"}
 
-var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "dm", "mp_map_dm": -1, "mp_map_zombies": -1}
+var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "ffa"}
 var state := "menu"
 var mode := "ops"
 var map_idx := 0
@@ -369,8 +369,15 @@ func _reset() -> void:
 		zm = null
 	if map_dirty:
 		load_map(map_idx)
+	if player and is_instance_valid(player):
+		player.queue_free()
+	player = PlayerScript.new()
+	player.game = self
+	add_child(player)
 	var md: Dictionary = WorldBuilder.MAPS[map_idx]
-	_new_player(md.start, md.yaw)
+	player.global_position = md.start
+	player.yaw = md.yaw
+	player.camera.current = true
 	wave = 0
 	to_spawn = 0
 	spawn_t = 0.0
@@ -399,74 +406,71 @@ func _reset() -> void:
 		zm = ZModeScript.new()
 		add_child(zm)
 		zm.setup(self)
-		_zombie_loadout()
-		if net.coop():
-			ui.notice("ZOMBIS COOPERATIVO", "%s · %d jugadores · F para interactuar · Tab: marcador" % [md.name, net.players.size()], 4.0)
-		else:
-			ui.notice(md.name.to_upper(), "Sobrevive todas las rondas que puedas · F para interactuar", 4.0)
+		player.owned = [2]
+		player.weapons[2].reserve = 48
+		player.grenades = 2
+		player.test_switch(2)
+		ui.notice(md.name.to_upper(), "Sobrevive todas las rondas que puedas · F para interactuar", 4.0)
 	elif mode != "mp":
 		ui.notice("PREPÁRATE", "%s · la primera oleada llega en 3 segundos" % md.name, 3.0)
 
 
-## Replace the player with a brand-new one. Respawning with a fresh node guarantees nothing
-## from the previous life carries over (held trigger, aim, half-done reload, knife, grenade...).
-func _new_player(pos: Vector3, yaw: float) -> void:
-	if player and is_instance_valid(player):
-		player.queue_free()
-	player = PlayerScript.new()
-	player.game = self
-	add_child(player)
-	player.global_position = pos
-	player.yaw = yaw
-	player.camera.current = true
-
-
-func _zombie_loadout() -> void:
-	player.owned = [2]
-	player.weapons[2].reserve = 48
-	player.grenades = 2
-	player.test_switch(2)
-
-
-## Start (or rejoin) a multiplayer match on map i (deathmatch or co-op zombies, see net.gmode).
+## Start (or rejoin) a multiplayer match on map i (mode in net.gmode).
 func start_mp(i: int) -> void:
-	net.reset_zombies()
-	load_map(i)
+	if map_dirty or i != map_idx:
+		load_map(i)
+	else:
+		mode = WorldBuilder.MAPS[i].mode
 	if net.gmode == "zombies":
 		mode = "zombies"
 		start_game()
+		ui.notice(net.mode_title(), "%s · F para interactuar · Tab: marcador" % WorldBuilder.MAPS[i].name, 4.0)
 		return
 	mode = "mp"
 	start_game()
 	mp_respawn()
-	ui.notice("DUELO A MUERTE", "Primero en llegar a %d bajas gana · Tab: marcador" % net.KILL_GOAL, 4.0)
+	ui.notice(net.mode_title(), net.MODES[net.gmode][1] + " · Tab: marcador", 4.0)
 
 
-## Co-op zombies: a fallen player comes back at the start of the next round, with the
-## starting pistol (points are kept, perks and bought weapons are lost).
-func coop_respawn() -> void:
-	var md: Dictionary = WorldBuilder.MAPS[map_idx]
-	var pos: Vector3 = md.start
-	# next to a living teammate if there is one
-	for id in net.puppets:
-		var pp = net.puppets[id]
-		if is_instance_valid(pp) and not pp.dead:
-			pos = pp.global_position + Vector3(randf_range(-1.0, 1.0), 0.3, randf_range(-1.0, 1.0))
-			break
-	_new_player(pos, md.yaw)
-	_zombie_loadout()
-	if zm:
-		zm.perks_owned.clear()
-	if net.players.has(net.my_id()):
-		net.players[net.my_id()].dead = false
-	ui.notice("DE VUELTA EN PIE", "Has reaparecido con la pistola", 2.5)
+## Gun game: give the local player only the weapon of their current ladder level.
+func gun_game_loadout(announce := false) -> void:
+	if player == null or not is_instance_valid(player) or net.gmode != "gun":
+		return
+	var w: int = net.gun_weapon(net.my_id())
+	player.owned = [w]
+	player.weapons[w].ammo = player.weapons[w].mag
+	player.weapons[w].reserve = player.weapons[w].reserve_max
+	player.test_switch(w)
+	if announce:
+		sfx.play("buy")
+		ui.notice("NUEVA ARMA", player.weapons[w].name, 1.5)
 
 
-## Respawn the local player at the spawn point farthest from the other players.
-func mp_respawn() -> void:
+## Respawn the local player at the spawn point farthest from the other players
+## (in co-op zombies: next to a living teammate, or at the map start).
+func mp_respawn(_revive := false) -> void:
 	if player == null or not is_instance_valid(player):
 		return
+	if net.gmode == "zombies":
+		var at: Vector3 = WorldBuilder.MAPS[map_idx].start
+		for id in net.puppets:
+			var mate = net.puppets[id]
+			if is_instance_valid(mate) and not mate.dead:
+				at = mate.global_position + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
+				break
+		player.global_position = at + Vector3(0, 0.3, 0)
+		player.velocity = Vector3.ZERO
+		player.alive = true
+		player.health = player.max_health
+		player.refill()
+		return
 	var pts: Array = spawns if not spawns.is_empty() else [WorldBuilder.MAPS[map_idx].start]
+	if net.gmode == "tdm":
+		# each team spawns on its own half of the map
+		var side: float = -1.0 if net.team_of(net.my_id()) == 0 else 1.0
+		var half: Array = pts.filter(func(p): return p.x * side > 0.0)
+		if half.size() >= 2:
+			pts = half
 	var best: Vector3 = pts[randi() % pts.size()]
 	var best_d := -1.0
 	for i in 12:
@@ -474,12 +478,20 @@ func mp_respawn() -> void:
 		var dmin := 999.0
 		for id in net.puppets:
 			var pp = net.puppets[id]
-			if is_instance_valid(pp) and not pp.dead:
+			if is_instance_valid(pp) and not pp.dead and not net.is_ally(id):
 				dmin = minf(dmin, c.distance_to(pp.global_position))
 		if dmin > best_d:
 			best_d = dmin
 			best = c
-	_new_player(best + Vector3(0, 0.3, 0), atan2(best.x, best.z))
+	player.global_position = best + Vector3(0, 0.3, 0)
+	player.velocity = Vector3.ZERO
+	player.alive = true
+	player.health = player.max_health
+	player.yaw = atan2(best.x, best.z)
+	player.max_ammo()
+	player.grenades = 3
+	if net.gmode == "gun":
+		gun_game_loadout()
 	ks = 0
 	ks_given = {}
 	streak = 0
@@ -573,11 +585,10 @@ func _process(delta: float) -> void:
 		menu_cam.look_at(Vector3(0, 2, 0))
 	elif player and is_instance_valid(player):
 		cam = player.camera
-		# online the match keeps running underneath the pause menu
+		# online the world keeps running while the pause menu is open
 		if state == "playing" or (state == "paused" and net.active):
 			if mode == "zombies":
-				if not (net.active and net.ended):
-					zm.update(delta)
+				zm.update(delta)
 			elif mode == "mp":
 				pass
 			else:
@@ -592,7 +603,7 @@ func _process(delta: float) -> void:
 func alive_count() -> int:
 	var n := 0
 	for e in enemies:
-		if is_instance_valid(e) and not e.dead:
+		if is_instance_valid(e) and not e.dead and e.get("puppet") != true:
 			n += 1
 	return n
 
@@ -987,89 +998,44 @@ func _autotest() -> void:
 	get_tree().quit()
 
 
-## Two-instance co-op zombies check (--mptest=zhost / --mptest=zjoin).
-func _mptest_coop(role: String) -> void:
-	var log := []
-	if role == "zhost":
-		net.host("Anfitrión", 3, net.PORT, "zombies")
-		player.god = true
-		var t := 0.0
-		while net.players.size() < 2 and t < 20.0:
-			await get_tree().create_timer(0.25).timeout
-			t += 0.25
-		log.append("players=%d mode=%s" % [net.players.size(), mode])
-		await get_tree().create_timer(9.0).timeout
-		log.append("round=%d zombies=%d teammate_puppet=%s" % [zm.round_n, net.zombies.size(), str(net.puppets.size())])
-		# open the first door for everybody
-		zm.points = 99999
-		var di := 0
-		zm.target = {"type": "door", "ref": zm.L.doors[di]}
-		zm.interact()
-		await get_tree().create_timer(10.0).timeout
-		log.append("host_points=%d client_kills=%s" % [zm.points, str(net.players.values().map(func(p): return p.kills))])
-		# host goes down too: the whole team is down -> match over
-		player.god = false
-		player.take_damage(9999.0, player.global_position)
-		await get_tree().create_timer(1.0).timeout
-		log.append("ended=%s" % str(net.ended))
-		await get_tree().create_timer(3.0).timeout
-	else:
-		await get_tree().create_timer(1.5).timeout
-		net.join("Cliente", "127.0.0.1")
-		var t2 := 0.0
-		while state != "playing" and t2 < 20.0:
-			await get_tree().create_timer(0.25).timeout
-			t2 += 0.25
-		player.god = true
-		log.append("in_game=%s mode=%s map=%d" % [str(state == "playing"), mode, map_idx])
-		await get_tree().create_timer(9.0).timeout
-		var reps := 0
-		for e in enemies:
-			if is_instance_valid(e) and e.get("remote") and not e.dead:
-				reps += 1
-		log.append("round=%d replicas=%d left=%d" % [zm.round_n, reps, zm.left()])
-		var p0: int = zm.points
-		for e in enemies.duplicate():
-			if is_instance_valid(e) and e.get("remote") and not e.dead:
-				kill_ctx = {"weapon": 2, "melee": false, "last": false, "dist": 5.0, "hp": 100.0}
-				e.take_damage(99999.0, true)
-				kill_ctx = {}
-				break
-		await get_tree().create_timer(1.5).timeout
-		log.append("points %d->%d kills=%d doors_open=%s" % [p0, zm.points, kills, str(zm.open_doors())])
-		player.god = false
-		player.take_damage(9999.0, player.global_position)
-		await get_tree().create_timer(1.0).timeout
-		log.append("dead=%s host_sees_me_dead=%s" % [str(not player.alive), "?"])
-		await get_tree().create_timer(10.0).timeout
-		log.append("ended=%s" % str(net.ended))
-	print("MPTEST ", role, " ", " | ".join(log))
-	net.leave()
-	get_tree().quit()
-
-
 ## Two-instance network check: one host, one client, each damages the other through the network.
 func _mptest(role: String) -> void:
 	await get_tree().process_frame
-	if role == "zhost" or role == "zjoin":
-		_mptest_coop(role)
-		return
 	var log := []
+	var mm := arg_value("--mpmode") if arg_value("--mpmode") != "" else "ffa"
 	if role == "host":
-		net.host("Anfitrión", 0)
+		net.host("Anfitrión", 3 if mm == "zombies" else 0, net.PORT, mm)
+		player.god = true
+		if zm:
+			zm.inter = 2.0
 		var t := 0.0
 		while net.players.size() < 2 and t < 20.0:
 			await get_tree().create_timer(0.25).timeout
 			t += 0.25
-		log.append("players=%d" % net.players.size())
+		log.append("mode=%s players=%d" % [net.gmode, net.players.size()])
 		await get_tree().create_timer(4.0).timeout
 		var cid := 0
 		for id in net.players:
 			if id != 1:
 				cid = id
-		log.append("puppet_client=%s" % str(net.puppets.has(cid)))
-		net.send_hit(cid, 250.0, true)
+		log.append("puppet_client=%s ally=%s" % [str(net.puppets.has(cid)), str(net.is_ally(cid))])
+		if mm == "tdm":
+			log.append("teams host=%d client=%d" % [net.team_of(1), net.team_of(cid)])
+			# put the client on the other team so the hit counts
+			net.players[cid].team = 1 - net.team_of(1)
+			net.rpc("sync_players", net.players)
+			await get_tree().create_timer(0.5).timeout
+		if mm == "zombies":
+			log.append("host_zombies=%d round=%d" % [alive_count(), zm.round_n])
+		else:
+			net.send_hit(cid, 250.0, true)
 		await get_tree().create_timer(9.0).timeout
+		if mm == "gun":
+			log.append("host_gun_lvl=%d owned=%s" % [int(net.players[1].lvl), str(player.owned)])
+		if mm == "tdm":
+			log.append("team_kills=%s" % str(net.team_kills))
+		if mm == "zombies":
+			log.append("host_zombies_end=%d" % alive_count())
 	else:
 		await get_tree().create_timer(1.5).timeout
 		if role == "lanjoin":   # find the host through the LAN beacon instead of a typed IP
@@ -1092,15 +1058,31 @@ func _mptest(role: String) -> void:
 			await get_tree().create_timer(0.25).timeout
 			t2 += 0.25
 		await get_tree().create_timer(2.0).timeout
-		log.append("in_game=%s map=%d puppet_host=%s" % [str(state == "playing"), map_idx, str(net.puppets.has(1))])
-		# holding the trigger and aiming when the host's hit kills us
-		player.mouse_down = true
-		player.aiming = true
+		log.append("in_game=%s mode=%s gmode=%s map=%d puppet_host=%s" % [str(state == "playing"), mode, net.gmode, map_idx, str(net.puppets.has(1))])
 		net.shot(Vector3(0, 1, 0))
-		net.send_hit(1, 60.0, false)
-		net.send_hit(1, 60.0, false)
+		if net.gmode == "zombies":
+			player.god = true
+			await get_tree().create_timer(3.0).timeout
+			var remote_n := 0
+			var first = null
+			for e in enemies:
+				if is_instance_valid(e) and e.get("remote") == true and not e.dead:
+					remote_n += 1
+					if first == null:
+						first = e
+			var p0: int = zm.points
+			log.append("client_remote_zombies=%d round=%d" % [remote_n, zm.round_n])
+			if first != null:
+				first.take_damage(1.0e6, true)
+			await get_tree().create_timer(1.5).timeout
+			log.append("points %d -> %d kills=%d" % [p0, zm.points, kills])
+		else:
+			net.send_hit(1, 60.0, false)
+			net.send_hit(1, 60.0, false)
 		await get_tree().create_timer(6.0).timeout
-		log.append("alive_after_respawn=%s held_trigger=%s aiming=%s" % [str(player != null and player.alive), str(player.mouse_down), str(player.aiming)])
+		if net.gmode == "gun":
+			log.append("client_owned=%s" % str(player.owned))
+		log.append("alive_after_respawn=%s" % str(player != null and player.alive))
 		await get_tree().create_timer(4.0).timeout
 	var sc := []
 	for id in net.players:

@@ -1,8 +1,10 @@
 extends Node
 ## Sound effects: pooled 2D players for the player's own sounds, temporary 3D players for the world.
 
-const NAMES := ["rifle", "pistol", "shotgun", "enemy", "empty", "mag_out", "mag_in", "rack", "hit", "kill", "hurt", "whiz", "step", "click", "wave", "swish",
-	"smg", "lmg", "sniper", "bolt", "knife", "stab", "zgroan1", "zgroan2", "zgroan3", "zattack", "zdie", "buy", "deny", "powerup", "round", "medal", "door", "perk", "boom", "jet", "pin", "radar"]
+const NAMES := ["rifle", "pistol", "shotgun", "enemy", "empty", "mag_out", "mag_in", "rack", "hit", "kill", "hurt", "whiz", "click", "wave", "swish",
+	"step1", "step2", "step3", "step4", "step5", "step6", "land",
+	"smg", "lmg", "sniper", "bolt", "knife", "stab", "zgroan1", "zgroan2", "zgroan3", "zgroan4", "zgroan5",
+	"zattack1", "zattack2", "zdie1", "zdie2", "buy", "deny", "powerup", "round", "medal", "door", "perk", "boom", "jet", "pin", "radar"]
 var streams := {}
 var pool: Array = []
 

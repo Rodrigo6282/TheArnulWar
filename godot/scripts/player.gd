@@ -38,6 +38,7 @@ var land_v := 0.0
 var was_on_floor := true
 var shake := 0.0
 var step_t := 0.0
+var step_last := 0
 var mouse_down := false
 var aiming := false
 var sprinting := false
@@ -265,7 +266,7 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	if is_on_floor() and not was_on_floor and vy < -4.0:
 		land_v -= minf(0.9, -vy * 0.08)
-		game.sfx.play("step", -2)
+		game.sfx.play("land", -4, 0.04)
 	was_on_floor = is_on_floor()
 	rotation.y = yaw
 	var hs := Vector2(velocity.x, velocity.z).length()
@@ -274,7 +275,13 @@ func _physics_process(delta: float) -> void:
 		step_t -= delta * hs / 5.4
 		if step_t <= 0.0:
 			step_t = 0.42
-			game.sfx.play("step", -10 if crouch > 0.5 else -5, 0.15)
+			# never the same sample twice in a row; louder when sprinting, very soft crouched
+			var si := randi() % 5
+			if si >= step_last:
+				si += 1
+			step_last = si
+			var vol := -16.0 if crouch > 0.5 else (-8.0 if hs > 6.0 else -11.0)
+			game.sfx.play("step%d" % (si + 1), vol, 0.06)
 	# lean (Q/E), blocked by walls at the side
 	var lt := float(Input.is_physical_key_pressed(KEY_E)) - float(Input.is_physical_key_pressed(KEY_Q))
 	if sprinting:
@@ -919,14 +926,8 @@ func take_damage(amount: float, from: Vector3) -> void:
 	if health <= 0.0:
 		health = 0.0
 		alive = false
-		# drop every held input: the release events are ignored while dead
-		mouse_down = false
-		aiming = false
-		reloading = false
-		if game.mode == "mp":
+		if game.net.active:
 			game.net.local_died()
-		elif game.net.coop():
-			game.net.coop_local_died()
 		else:
 			game.game_over()
 
