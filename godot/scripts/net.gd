@@ -56,8 +56,8 @@ var host_uid := ""
 
 
 func _process(delta: float) -> void:
-	# host side: announce the game while it is running
-	if active and is_host and not ended:
+	# host side: announce the LAN game while it is running (online games use the invite code)
+	if active and is_host and not ended and not online_mode:
 		beacon_t -= delta
 		if beacon_t <= 0.0:
 			beacon_t = 1.0
@@ -130,6 +130,7 @@ func _ready() -> void:
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_failed)
 	multiplayer.server_disconnected.connect(_on_server_lost)
+	_make_online()
 
 
 func my_id() -> int:
@@ -145,6 +146,59 @@ static func local_ips() -> Array:
 
 
 # ---------------------------------------------------------------- host / join / leave
+# ---------------------------------------------------------------- online (internet) play
+# Without opening ports: WebRTC through online.gd (encrypted signalling on a public message board,
+# direct peer-to-peer connection with STUN). ENet stays for the local network and typed IPs.
+const OnlineScript := preload("res://scripts/online.gd")
+signal online_changed
+var online: Node
+var online_mode := false     # this game was created / joined with an invite code
+var invite_code := ""
+
+
+func _make_online() -> void:
+	online = OnlineScript.new()
+	online.name = "Online"
+	online.net = self
+	add_child(online)
+	online.failed.connect(_on_online_failed)
+
+
+## online.gd found the host: install the WebRTC peer (connected_to_server fires when it opens).
+func use_peer(p: MultiplayerPeer) -> void:
+	multiplayer.multiplayer_peer = p
+	status = "Conectando con el anfitrión..."
+	game.ui.mp_status(status)
+
+
+func _on_online_failed(msg: String) -> void:
+	if is_host:
+		return
+	leave()
+	game.ui.mp_status(msg)
+
+
+## Join an online game with its invite code.
+func join_code(player_name: String, c: String) -> String:
+	if not OnlineScript.valid_code(c):
+		return "Código no válido: revisa que tenga 8 caracteres (por ejemplo 7K3M-9QX4)."
+	leave()
+	multiplayer.multiplayer_peer = null
+	active = true
+	is_host = false
+	online_mode = true
+	my_name = player_name
+	status = "Buscando la partida %s..." % c.to_upper()
+	online.join_room(c)
+	return ""
+
+
+## One line for the HUD / scoreboard / pause menu.
+func online_line() -> String:
+	if active and is_host and online_mode and invite_code != "":
+		return "Código para invitar: %s" % invite_code
+	return ""
+
 func mode_title() -> String:
 	return MODES.get(gmode, MODES.ffa)[0]
 
@@ -174,14 +228,20 @@ func _new_player(pname: String, op_i: int) -> Dictionary:
 	return {"name": pname.substr(0, 16), "kills": 0, "deaths": 0, "op": op_i, "team": 0 if n[0] <= n[1] else 1, "lvl": 0, "lk": 0}
 
 
-func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa") -> String:
+## online = internet game with an invite code (WebRTC, no ports to open); else LAN (ENet).
+func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa", online_game := false) -> String:
 	leave()
 	gmode = mode_id if MODES.has(mode_id) else "ffa"
-	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(port, 8)
-	if err != OK:
-		return "No se pudo crear la partida en el puerto %d (¿ya está en uso?)" % port
-	multiplayer.multiplayer_peer = peer
+	if online_game:
+		multiplayer.multiplayer_peer = online.host_room()
+		invite_code = online.code
+		online_mode = true
+	else:
+		var peer := ENetMultiplayerPeer.new()
+		var err := peer.create_server(port, 8)
+		if err != OK:
+			return "No se pudo crear la partida en el puerto %d (¿ya está en uso?)" % port
+		multiplayer.multiplayer_peer = peer
 	active = true
 	is_host = true
 	my_name = player_name
@@ -194,6 +254,9 @@ func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa") -> St
 	players = {}
 	players[1] = _new_player(my_name, int(game.settings.get("op", 0)))
 	game.start_mp(map_idx)
+	if online_mode:
+		game.ui.notice("PARTIDA ONLINE", "Código para invitar: %s  ·  lo tienes en Tab y en el menú de pausa (con botón para copiarlo)" % invite_code, 7.0)
+		online_changed.emit()
 	return ""
 
 
@@ -223,6 +286,10 @@ func leave() -> void:
 	is_host = false
 	ended = false
 	team_kills = [0, 0]
+	if online:
+		online.close()
+	online_mode = false
+	invite_code = ""
 
 
 func _on_connected() -> void:

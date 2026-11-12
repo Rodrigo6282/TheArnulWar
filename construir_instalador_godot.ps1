@@ -1,7 +1,7 @@
 ﻿# Construye la version Godot de The Arnul War en .\dist_godot:
 #   The Arnuls <version> Instalador.exe     - instalador con asistente (Inno Setup)
 #   TheArnulWar_v<version>_Portable.zip    - juego sin instalar (exe + LEEME)
-#   TheArnulWar.exe                        - el juego exportado por Godot
+#   TheArnulWar.exe + *.dll                - el juego exportado por Godot (+ complemento WebRTC)
 # Uso: powershell -ExecutionPolicy Bypass -File construir_instalador_godot.ps1
 # Requisitos: plantillas de exportacion de Godot 4.7.2 (en %APPDATA%\Godot\export_templates)
 #             e Inno Setup 6 (ISCC.exe).
@@ -34,7 +34,9 @@ if ($LASTEXITCODE -ne 0) { throw "Inno Setup ha fallado (codigo $LASTEXITCODE)."
 
 # 3) version portatil
 $zip = Join-Path $dist "TheArnulWar_v${ver}_Portable.zip"
-Compress-Archive -Path $exeOut, (Join-Path $root 'instalador_godot\LEEME.txt') -DestinationPath $zip -CompressionLevel Optimal -Force
+$dlls = @(Get-ChildItem $dist -Filter *.dll | ForEach-Object FullName)
+if ($dlls.Count -eq 0) { throw 'Falta la DLL de WebRTC junto al exe (addons/webrtc_native).' }
+Compress-Archive -Path (@($exeOut, (Join-Path $root 'instalador_godot\LEEME.txt')) + $dlls) -DestinationPath $zip -CompressionLevel Optimal -Force
 
 Write-Host "The Arnul War v$ver listo en $dist"
 Get-ChildItem $dist -File | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}

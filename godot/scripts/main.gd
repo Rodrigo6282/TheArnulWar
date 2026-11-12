@@ -129,6 +129,8 @@ func _ready() -> void:
 		_mptest(arg_value("--mptest"))
 	elif has_arg("--climbtest"):
 		_climbtest()
+	elif has_arg("--onlinetest"):
+		_onlinetest()
 
 
 func has_arg(a: String) -> bool:
@@ -1045,13 +1047,19 @@ func _mptest(role: String) -> void:
 	await get_tree().process_frame
 	var log := []
 	var mm := arg_value("--mpmode") if arg_value("--mpmode") != "" else "ffa"
+	# --rtc: the game goes through the internet (WebRTC + invite code) instead of LAN ENet
+	var rtc := has_arg("--rtc")
 	if role == "host":
-		net.host("Anfitrión", 3 if mm == "zombies" else 0, net.PORT, mm)
+		net.host("Anfitrión", 3 if mm == "zombies" else 0, net.PORT, mm, rtc)
+		if rtc:
+			var fc := FileAccess.open("user://rtc_test_code.txt", FileAccess.WRITE)
+			fc.store_string("%s|%d" % [net.invite_code, int(Time.get_unix_time_from_system())])
+			fc.close()
 		player.god = true
 		if zm:
 			zm.inter = 2.0
 		var t := 0.0
-		while net.players.size() < 2 and t < 20.0:
+		while net.players.size() < 2 and t < (60.0 if rtc else 20.0):
 			await get_tree().create_timer(0.25).timeout
 			t += 0.25
 		log.append("mode=%s players=%d" % [net.gmode, net.players.size()])
@@ -1093,6 +1101,25 @@ func _mptest(role: String) -> void:
 				get_tree().quit()
 				return
 			net.join("Cliente", found[0].ip, found[0].port)
+		elif rtc:
+			# wait for the code written by the host in this run (not an old file)
+			var t0 := Time.get_unix_time_from_system() - 3.0
+			var tw := 0.0
+			var code := ""
+			while tw < 15.0:
+				if FileAccess.file_exists("user://rtc_test_code.txt"):
+					var parts := FileAccess.get_file_as_string("user://rtc_test_code.txt").strip_edges().split("|")
+					if parts.size() == 2 and int(parts[1]) >= int(t0) - 10:
+						code = parts[0]
+						break
+				await get_tree().create_timer(0.25).timeout
+				tw += 0.25
+			log.append("codigo_leido=%s" % str(code != ""))
+			var t_join := Time.get_ticks_msec()
+			net.join_code("Cliente", code)
+			while state != "playing" and Time.get_ticks_msec() - t_join < 45000:
+				await get_tree().create_timer(0.25).timeout
+			log.append("conexion_online_ms=%d" % (Time.get_ticks_msec() - t_join))
 		else:
 			net.join("Cliente", "127.0.0.1")
 		var t2 := 0.0
@@ -1144,6 +1171,36 @@ func _mptest(role: String) -> void:
 	net.leave()
 	get_tree().quit()
 
+
+## Invite codes: format, check letter and typo detection.
+func _onlinetest() -> void:
+	await get_tree().process_frame
+	var OL := preload("res://scripts/online.gd")
+	var bad := 0
+	var typos := 0
+	var caught := 0
+	var sample := ""
+	for k in 200:
+		var c: String = OL.new_code()
+		if k == 0:
+			sample = c
+		if not OL.valid_code(c) or not OL.valid_code(c.to_lower()):
+			bad += 1
+		var n: String = OL.normalize(c)
+		for i in 8:
+			for ch in OL.CODE_ABC:
+				if str(ch) == n[i]:
+					continue
+				typos += 1
+				var typo: String = n.substr(0, i) + str(ch) + n.substr(i + 1)
+				if not OL.valid_code(typo):
+					caught += 1
+	# the WebRTC extension must be loaded (exported builds ship it as a DLL next to the exe)
+	var pcx := WebRTCPeerConnection.new()
+	var webrtc_ok := pcx.initialize(OL.ICE) == OK
+	pcx.close()
+	print("ONLINETEST ejemplo=%s codigos_invalidos=%d erratas_detectadas=%d/%d basura=%s webrtc=%s" % [sample, bad, caught, typos, str(OL.valid_code("HOLA-MUNDO")), str(webrtc_ok)])
+	get_tree().quit()
 
 ## Climb / vault / death-reset checks on an open spot of map 0 (headless).
 func _climbtest() -> void:
@@ -1387,6 +1444,9 @@ func _shot(kind: String, out: String) -> void:
 		settings["op"] = int(arg_value("--op"))
 	if kind == "menu":
 		await get_tree().create_timer(3.0).timeout
+	elif kind == "mp":
+		ui.show_mp()
+		await get_tree().create_timer(3.0).timeout
 	elif kind == "zwall" or kind == "zbox":
 		start_game()
 		player.god = true
@@ -1410,6 +1470,26 @@ func _shot(kind: String, out: String) -> void:
 		settings["name"] = "Arnul"
 		ui.show_ops()
 		await get_tree().create_timer(2.0).timeout
+	elif kind == "soldiers":
+		# close-up of the soldier bodies: one aiming, one walking, one reloading
+		start_game()
+		intermission = 999.0
+		player.god = true
+		player.global_position = Vector3(0, 0.2, 22 if arg_value("--near") == "" else 19.6)
+		player.yaw = 0.0
+		player.pitch = -0.05
+		var mode_s := arg_value("--pose")
+		for i in 3:
+			var s = SoldierScript.new()
+			s.game = self
+			add_child(s)
+			s.global_position = Vector3(-2.2 + i * 2.2, 0.3, 17.5 - absf(i - 1) * 0.6)
+			s.speed = 0.0 if mode_s == "" else 1.2
+			s.reaction = 0.2
+			enemies.append(s)
+		await get_tree().create_timer(1.2).timeout
+		enemies[1].reload_t = 1.0
+		await get_tree().create_timer(float(arg_value("--wait")) if arg_value("--wait") != "" else 0.6).timeout
 	elif kind == "map":
 		# overview from the player start, no enemies
 		start_game()

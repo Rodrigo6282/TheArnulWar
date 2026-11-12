@@ -1,8 +1,22 @@
-﻿The Arnul War - versión 1.2.1
+﻿The Arnul War - versión 1.3.0
 ============================
 
 Shooter en primera persona hecho con el motor Godot 4.7. Es un programa normal de
 Windows: no necesita navegador ni conexión a internet (salvo para jugar online).
+
+
+NOVEDADES DE LA VERSIÓN 1.3.0
+-----------------------------
+  - Personajes nuevos con animaciones de captura de movimiento: los soldados
+    enemigos y los operadores (camuflaje digital, SWAT con máscara de gas e
+    infantería) apuntan, corren, se cubren, recargan y caen de forma realista.
+  - Zombis nuevos (policía, mujer y soldado) que salen del suelo gritando,
+    andan, corren y atacan con animaciones reales; un tiro a la cabeza puede
+    arrancársela.
+  - Escenarios con objetos escaneados de verdad: barriles, cajas militares y de
+    munición, barreras de hormigón, neumáticos, bombonas, bidones, generadores,
+    sacos de cemento y rocas.
+  - Jugar online por internet con código de invitación, sin abrir puertos.
 
 
 NOVEDADES DE LA VERSIÓN 1.2.1
@@ -43,7 +57,8 @@ dispara solo (B para usarlas; la racha se pierde si bajas de media vida).
 MULTIJUGADOR
 ------------
 Menú principal > MULTIJUGADOR.
-  - El anfitrión elige el MODO y el MAPA y pulsa "CREAR PARTIDA".
+  - El anfitrión elige el MODO y el MAPA y pulsa "CREAR PARTIDA LOCAL" (misma red)
+    o "CREAR PARTIDA ONLINE" (por internet).
   - A los demás de la misma red (wifi o cable) les aparece sola en la lista
     "PARTIDAS EN TU RED": solo tienen que pulsar "UNIRSE" (también se puede
     unir escribiendo la IP).
@@ -63,16 +78,30 @@ Menú principal > MULTIJUGADOR.
                         tanto ves la partida desde la cámara de un compañero
                         vivo (clic izquierdo para cambiar de compañero).
 
-  - La primera vez Windows preguntará si permite la conexión: pulsa "Permitir acceso".
-  - Por internet: el anfitrión debe abrir el puerto 7777 UDP en su router, o todos usar
-    una VPN de juegos gratuita (Radmin VPN, ZeroTier) y usar la IP que da la VPN.
+  - La primera vez Windows preguntará si permite la conexión: pulsa "Permitir acceso"
+    (marca también "redes públicas" si quieres jugar por internet).
+
+JUGAR ONLINE (por internet, sin abrir puertos)
+  1. El anfitrión va a MULTIJUGADOR > ONLINE y pulsa "CREAR PARTIDA ONLINE". Aparece un
+     código de invitación como 7K3M-9QX4 (también con Tab y en el menú de pausa, con un
+     botón para copiarlo).
+  2. Lo manda a sus amigos (WhatsApp, Discord...).
+  3. Los amigos van a MULTIJUGADOR > ONLINE, escriben el código y pulsan
+     "UNIRSE CON CÓDIGO". En unos segundos están dentro.
+  No hay que tocar el router ni abrir puertos: los PCs se conectan directamente (WebRTC).
+  Para presentarse usan un tablón de mensajes público (ntfy.sh); los mensajes van
+  cifrados con el código, así que nadie sin el código puede leerlos.
+  Si no conecta: alguna de las conexiones no permite la conexión directa (pasa en
+  algunas redes 4G, de empresa o con CG-NAT). Probad con otra red o con una VPN de juegos
+  gratuita (Radmin VPN, ZeroTier) y uníos escribiendo la IP de la VPN en la misma casilla.
+
 Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
 (Halcón, Espectro, Duna, Ártico, Cobra, Jaguar). Los demás jugadores te ven así.
 
 
 INSTALAR
 --------
-Ejecuta "The Arnuls 1.2.1 Instalador.exe" y sigue el asistente:
+Ejecuta "The Arnuls 1.3.0 Instalador.exe" y sigue el asistente:
   1. Elige la carpeta (la que propone ya está bien).
   2. Marca si quieres acceso directo en el escritorio.
   3. Pulsa "Instalar" y, al terminar, "Finalizar" para empezar a jugar.
@@ -82,7 +111,7 @@ se sustituye sola y se conserva tu progreso (récords, medallas y ajustes).
 Windows SmartScreen puede avisar porque el programa no está firmado:
 pulsa "Más información" y después "Ejecutar de todas formas".
 
-Sin instalar: descomprime "TheArnulWar_v1.2.1_Portable.zip" y haz doble clic en
+Sin instalar: descomprime "TheArnulWar_v1.3.0_Portable.zip" y haz doble clic en
 "TheArnulWar.exe".
 
 
@@ -117,4 +146,5 @@ Al final te pregunta si también quieres borrar tu progreso guardado.
 CRÉDITOS
 --------
 Motor: Godot Engine (licencia MIT, godotengine.org).
-Texturas: Poly Haven (polyhaven.com), dominio público CC0.
+Texturas y modelos 3D de objetos: Poly Haven (polyhaven.com), dominio público CC0.
+Personajes y animaciones: Mixamo (mixamo.com), de Adobe.

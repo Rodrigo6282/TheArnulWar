@@ -48,6 +48,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist_godot\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+; complemento WebRTC (juego online sin abrir puertos): Godot lo exporta junto al exe
+Source: "..\dist_godot\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LEEME.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

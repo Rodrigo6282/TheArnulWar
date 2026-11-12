@@ -53,6 +53,8 @@ var mp_name: LineEdit
 var mp_ip: LineEdit
 var mp_map: OptionButton
 var mp_mode: OptionButton
+var pause_online: Label
+var pause_copy: Button
 var mp_stat: Label
 var mp_list: VBoxContainer
 var board_p: Control
@@ -357,6 +359,18 @@ func _build_pause() -> void:
 	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(t)
 	_button(vb, "Continuar", func(): game.resume())
+	pause_online = _label("", 17, GOLD, 3)
+	pause_online.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pause_online.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	pause_online.custom_minimum_size = Vector2(560, 0)
+	pause_online.visible = false
+	vb.add_child(pause_online)
+	pause_copy = _button(vb, "Copiar código de invitación", func():
+		DisplayServer.clipboard_set(game.net.invite_code)
+		pause_online.text = "Código %s copiado: pégalo en el chat con tus amigos" % game.net.invite_code
+	, true)
+	pause_copy.visible = false
+	game.net.online_changed.connect(_refresh_pause_online)
 	_button(vb, "Reiniciar", func():
 		if not game.net.active:
 			game.start_game()
@@ -636,52 +650,87 @@ func _build_mp() -> void:
 	mp_mode.item_selected.connect(func(_i): fill_maps.call())
 	mp_mode.selected = maxi(0, game.net.MODE_ORDER.find(game.settings.get("mp_mode", "ffa")))
 	fill_maps.call()
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 12)
-	vb.add_child(row)
-	_button(row, "CREAR PARTIDA", func():
+	# ---- two clear sections side by side: local network | online (internet)
+	var cols := HBoxContainer.new()
+	cols.alignment = BoxContainer.ALIGNMENT_CENTER
+	cols.add_theme_constant_override("separation", 24)
+	vb.add_child(cols)
+	var card := func(title: String, sub: String) -> VBoxContainer:
+		var pc := PanelContainer.new()
+		var sb2 := StyleBoxFlat.new()
+		sb2.bg_color = Color(0.03, 0.04, 0.04, 0.72)
+		sb2.set_corner_radius_all(8)
+		sb2.set_content_margin_all(16)
+		sb2.border_color = Color(0.95, 0.69, 0.2, 0.55)
+		sb2.set_border_width_all(1)
+		pc.add_theme_stylebox_override("panel", sb2)
+		pc.custom_minimum_size = Vector2(470, 330)
+		cols.add_child(pc)
+		var v := VBoxContainer.new()
+		v.add_theme_constant_override("separation", 10)
+		pc.add_child(v)
+		var h := _label(title, 26, GOLD, 5)
+		h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		v.add_child(h)
+		var s := _label(sub, 14, Color(0.85, 0.88, 0.86), 3)
+		s.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		s.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		v.add_child(s)
+		return v
+	var host_with := func(online: bool) -> void:
 		_save_mp()
-		var err: String = game.net.host(mp_name.text, mp_map.get_item_id(mp_map.selected), game.net.PORT, game.net.MODE_ORDER[mp_mode.selected])
+		var err: String = game.net.host(mp_name.text, mp_map.get_item_id(mp_map.selected), game.net.PORT, game.net.MODE_ORDER[mp_mode.selected], online)
 		mp_stat.text = err
-	)
-	# ---- games found on the local network (filled from net.lan_games)
-	var lt := _label("PARTIDAS EN TU RED", 24, GOLD, 5)
+	# LAN
+	var lan: VBoxContainer = card.call("EN TU RED (LAN)", "Misma wifi o cable. Las partidas aparecen solas en la lista.")
+	_button(lan, "CREAR PARTIDA LOCAL", func(): host_with.call(false))
+	var lt := _label("PARTIDAS EN TU RED", 17, Color(0.95, 0.9, 0.75), 3)
 	lt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vb.add_child(lt)
+	lan.add_child(lt)
 	var lpanel := PanelContainer.new()
 	var lsb := StyleBoxFlat.new()
-	lsb.bg_color = Color(0.03, 0.04, 0.04, 0.7)
+	lsb.bg_color = Color(0.0, 0.0, 0.0, 0.35)
 	lsb.set_corner_radius_all(6)
-	lsb.set_content_margin_all(10)
+	lsb.set_content_margin_all(8)
 	lpanel.add_theme_stylebox_override("panel", lsb)
-	lpanel.custom_minimum_size = Vector2(640, 150)
-	var lcc := CenterContainer.new()
-	lcc.add_child(lpanel)
-	vb.add_child(lcc)
+	lpanel.custom_minimum_size = Vector2(0, 120)
+	lan.add_child(lpanel)
 	mp_list = VBoxContainer.new()
 	mp_list.add_theme_constant_override("separation", 8)
 	lpanel.add_child(mp_list)
 	game.net.lan_changed.connect(_refresh_lan)
 	_refresh_lan()
-	# ---- manual IP (internet / VPN or when broadcast is blocked)
+	# ONLINE
+	var onl: VBoxContainer = card.call("ONLINE (POR INTERNET)", "Juega con amigos de cualquier sitio, sin abrir puertos. Al crear la partida recibes un código de invitación para compartir.")
+	_button(onl, "CREAR PARTIDA ONLINE", func(): host_with.call(true))
+	var jl := _label("¿Te han pasado un código? Escríbelo aquí:", 16, Color(0.95, 0.9, 0.75), 3)
+	jl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	onl.add_child(jl)
 	var iprow := HBoxContainer.new()
 	iprow.alignment = BoxContainer.ALIGNMENT_CENTER
 	iprow.add_theme_constant_override("separation", 10)
-	vb.add_child(iprow)
-	iprow.add_child(_label("¿No aparece? Unirse por IP:", 15, Color(0.8, 0.82, 0.8), 3))
+	onl.add_child(iprow)
 	mp_ip = LineEdit.new()
-	mp_ip.custom_minimum_size = Vector2(200, 0)
-	mp_ip.text = game.settings.get("last_ip", "127.0.0.1")
+	mp_ip.custom_minimum_size = Vector2(220, 0)
+	mp_ip.placeholder_text = "Código, ej.: 7K3M-9QX4"
+	mp_ip.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var last: String = game.settings.get("last_ip", "")
+	mp_ip.text = last if last != "127.0.0.1" else ""
 	iprow.add_child(mp_ip)
-	var jb := _button(iprow, "UNIRSE", func():
+	var jb := _button(iprow, "UNIRSE CON CÓDIGO", func():
 		_save_mp()
-		var err: String = game.net.join(mp_name.text, mp_ip.text.strip_edges())
+		var txt := mp_ip.text.strip_edges()
+		# an IP (LAN / game VPN) connects directly; anything else is an online invite code
+		var err: String = game.net.join(mp_name.text, txt) if txt.count(".") == 3 else game.net.join_code(mp_name.text, txt)
 		mp_stat.text = err if err != "" else game.net.status
 	, true)
-	jb.custom_minimum_size = Vector2(130, 0)
+	jb.custom_minimum_size = Vector2(200, 0)
+	var oh := _label("El código aparece al crear la partida online (también con Tab y en el menú de pausa).\nTambién puedes escribir una IP (por ejemplo, la de una VPN de juegos).", 13, Color(0.8, 0.82, 0.8), 3)
+	oh.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	oh.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	onl.add_child(oh)
 	var ips: Array = game.net.local_ips()
-	var info := _label("Tu IP: %s · Las partidas creadas en la misma red (wifi o cable) aparecen solas en la lista.\nSi Windows pregunta por el firewall la primera vez, pulsa \"Permitir acceso\" en redes privadas.\nPor internet: usa una VPN de juegos (Radmin VPN, ZeroTier) y escribe la IP del host." % [", ".join(ips) if not ips.is_empty() else "desconocida"], 14, Color(0.85, 0.88, 0.86), 3)
+	var info := _label("Tu IP local: %s  ·  Si Windows pregunta por el firewall, pulsa \"Permitir acceso\" (marca redes privadas y públicas)." % [", ".join(ips) if not ips.is_empty() else "desconocida"], 14, Color(0.85, 0.88, 0.86), 3)
 	info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(info)
 	mp_stat = _label("", 17, GOLD, 4)
@@ -865,7 +914,7 @@ func _refresh_lan() -> void:
 	var games: Dictionary = game.net.lan_games
 	if games.is_empty():
 		var msg := "Buscando partidas en la red local..." if game.net.listen_ok or game.net.listen_udp == null else "No se puede buscar partidas (el puerto %d está ocupado por otra copia del juego)." % game.net.LAN_PORT
-		var l := _label(msg + "\nCuando alguien de tu red pulse CREAR PARTIDA aparecerá aquí.", 16, Color(0.8, 0.82, 0.8), 3)
+		var l := _label(msg + "\nCuando alguien de tu red pulse CREAR PARTIDA LOCAL aparecerá aquí.", 16, Color(0.8, 0.82, 0.8), 3)
 		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		mp_list.add_child(l)
 		return
@@ -934,6 +983,17 @@ func show_hud() -> void:
 func show_pause() -> void:
 	pause_p.visible = true
 	sync_settings()
+	_refresh_pause_online()
+
+
+## Host of an online game: invite code + copy button in the pause menu.
+func _refresh_pause_online() -> void:
+	if pause_online == null:
+		return
+	var ol: String = game.net.online_line()
+	pause_online.text = ol
+	pause_online.visible = ol != ""
+	pause_copy.visible = game.net.invite_code != "" and game.net.active and game.net.is_host
 
 
 func show_gameover(st: Dictionary) -> void:
@@ -1195,6 +1255,9 @@ func tick(delta: float) -> void:
 	board_p.visible = game.net.active and Input.is_physical_key_pressed(KEY_TAB)
 	if board_p.visible:
 		board_l.text = game.net.board()
+		var ol: String = game.net.online_line()
+		if ol != "":
+			board_l.text += "\n" + ol
 	if game.mode == "mp":
 		wave_l.text = game.net.hud_line()
 	elif zm:

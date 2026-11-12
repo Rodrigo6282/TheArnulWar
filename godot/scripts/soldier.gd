@@ -2,6 +2,7 @@ extends CharacterBody3D
 const SHP := preload("res://scripts/shapes.gd")
 const OPT := preload("res://scripts/optimize.gd")
 const OPS := preload("res://scripts/operators.gd")
+const RIG := preload("res://scripts/rig.gd")
 ## Enemy soldier: articulated procedural body, engine navigation (NavigationAgent3D), burst fire,
 ## procedural walk / crouch / aim / reload / hit reaction and three death animations.
 
@@ -57,6 +58,8 @@ var net_aim := false
 var net_t := 0.0
 var op := -1              # operator look (multiplayer puppets / menu preview); -1 = enemy soldier
 var MM := {}              # per-instance material overrides
+var R := {}               # Mixamo body (rig.gd): node, skel, ap, aim; empty = procedural body
+var _prev := Vector3.ZERO
 
 static var M := {}
 static var ME := {}
@@ -256,7 +259,87 @@ func _headgear() -> void:
 			h4.scale = Vector3(0.85, 0.55, 0.85)
 
 
+func _build_skin() -> void:
+	var id: String = RIG.SOLDIERS[randi() % RIG.SOLDIERS.size()]
+	var tint := Color.WHITE
+	if op >= 0:
+		id = OPS.get_op(op).body
+		tint = OPS.get_op(op).tint
+	R = RIG.make(self, id, tint)
+	B.root = R.node
+	gun = _g(RIG.gun_mount(R, id), Vector3.ZERO)
+	_m(gun, "gbody", "gun", Vector3(0, 0, -0.05))
+	_m(gun, "gbarrel", "gun", Vector3(0, 0.015, -0.45), Vector3(PI / 2, 0, 0))
+	_m(gun, "gstock", "gun", Vector3(0, -0.02, 0.27))
+	mag = _m(gun, "gmag", "gun", Vector3(0, -0.11, -0.09), Vector3(0.22, 0, 0))
+	tip = _g(gun, Vector3(0, 0.015, -0.63))
+	flash = _m(gun, "flash", "flash", Vector3(0, 0.015, -0.63), Vector3.ZERO, false)
+	flash.visible = false
+	(R.ap as AnimationPlayer).play("idle")
+	(R.ap as AnimationPlayer).seek(randf() * 2.0, true)
+	_prev = global_position
+
+
+## Mixamo body: pick the clip from speed / direction / state; the spine follows the aim.
+func _animate_skin(delta: float, moved: float, aiming: bool, aim_pitch: float, rel_yaw: float) -> void:
+	var ap: AnimationPlayer = R.ap
+	var sp := moved / maxf(delta, 0.0001)
+	gait = lerpf(gait, sp, 1.0 - exp(-8.0 * delta))
+	var d := global_position - _prev
+	_prev = global_position
+	var local := Basis(Vector3.UP, facing).inverse() * d
+	crouch_k = lerpf(crouch_k, 1.0 if crouch_pref and aiming else 0.0, 1.0 - exp(-6.0 * delta))
+	aim_k = lerpf(aim_k, 1.0 if aiming and reload_t <= 0.0 else 0.0, 1.0 - exp(-8.0 * delta))
+	hit_k = maxf(0.0, hit_k - delta * 5.0)
+	kick = maxf(0.0, kick - delta * 10.0)
+	var clip := "idle"
+	var rate := 1.0
+	if reload_t > 0.0:
+		clip = "reload"
+		rate = 3.3 / reload_dur
+		var p := 1.0 - reload_t / reload_dur
+		mag.visible = not (p > 0.3 and p < 0.62)
+	else:
+		mag.visible = true
+		if crouch_k > 0.5:
+			clip = "crouch"
+			rate = clampf(gait / 1.1, 0.0, 1.5)
+		elif gait < 0.45:
+			clip = ("fire" if game.clock - last_shot < 0.35 else "aim") if aiming else "idle"
+		elif gait > 3.6 and not aiming:
+			clip = "run"
+			rate = clampf(gait / 4.6, 0.7, 1.4)
+		else:
+			var fz := -local.z
+			var fx := local.x
+			if absf(fx) > absf(fz) * 1.2:
+				clip = "right" if fx > 0.0 else "left"
+			elif fz < 0.0:
+				clip = "back"
+			else:
+				clip = "walk"
+			rate = clampf(gait / 1.5, 0.6, 1.8)
+	if ap.current_animation != clip:
+		ap.play(clip, 0.25 if clip != "fire" else 0.1)
+	ap.speed_scale = rate
+	var aim: RIG.Aim = R.aim
+	aim.pitch = aim_pitch * aim_k + kick * 0.05 - hit_k * 0.25
+	aim.yaw = rel_yaw * 0.6 * aim_k + hit_dir * hit_k * 0.2
+
+
+func _skin_die(head: bool) -> void:
+	var aim: RIG.Aim = R.aim
+	aim.pitch = 0.0
+	aim.yaw = 0.0
+	var ap: AnimationPlayer = R.ap
+	ap.speed_scale = 1.0
+	ap.play("die_head" if head else ["die_front", "die_back"][randi() % 2], 0.12)
+
+
 func _build_body() -> void:
+	if RIG.available():
+		_build_skin()
+		return
 	if op >= 0:
 		_apply_operator()
 	var root := _g(self, Vector3.ZERO)
@@ -336,6 +419,8 @@ func _die(head: bool) -> void:
 	death_type = 0 if head else randi() % 3
 	collision_layer = 0
 	flash.visible = false
+	if not R.is_empty():
+		_skin_die(head)
 	velocity = Vector3.ZERO
 	gun.reparent(game.world)
 	gun_vel = Vector3(randf_range(-1, 1), randf_range(1, 2), randf_range(-1, 1))
@@ -353,6 +438,8 @@ func net_die(head: bool) -> void:
 	death_type = 0 if head else randi() % 3
 	collision_layer = 0
 	flash.visible = false
+	if not R.is_empty():
+		_skin_die(head)
 	velocity = Vector3.ZERO
 	gun.reparent(game.world)
 	gun_vel = Vector3(randf_range(-1, 1), randf_range(1, 2), randf_range(-1, 1))
@@ -437,6 +524,9 @@ func _leg_pose(ph: float, g: float, c: float) -> void:
 
 
 func _animate(delta: float, moved: float, aiming: bool, aim_pitch: float, rel_yaw: float) -> void:
+	if not R.is_empty():
+		_animate_skin(delta, moved, aiming, aim_pitch, rel_yaw)
+		return
 	var sp := moved / maxf(delta, 0.0001)
 	gait = lerpf(gait, clampf(sp / 4.2, 0.0, 1.25), 1.0 - exp(-10.0 * delta))
 	phase += moved * 2.7
@@ -472,6 +562,8 @@ func _animate(delta: float, moved: float, aiming: bool, aim_pitch: float, rel_ya
 
 
 func _death_anim() -> void:
+	if not R.is_empty():
+		return
 	var r: Node3D = B.root
 	var t := dead_t
 	if death_type == 0:

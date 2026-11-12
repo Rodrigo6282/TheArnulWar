@@ -5,6 +5,7 @@ extends CharacterBody3D
 
 const SHP := preload("res://scripts/shapes.gd")
 const OPT := preload("res://scripts/optimize.gd")
+const RIG := preload("res://scripts/rig.gd")
 
 var game
 var round_n := 1
@@ -38,6 +39,7 @@ var net_pos := Vector3.ZERO
 var net_facing := 0.0
 var net_seen := 0.0
 var swipe_seen := false
+var R := {}                 # Mixamo body (rig.gd); empty = procedural body
 
 static var M := {}
 static var ME := {}
@@ -226,7 +228,48 @@ func _mat(arr_key: String) -> StandardMaterial3D:
 	return m
 
 
+func _build_skin() -> void:
+	R = RIG.make(self, RIG.ZOMBIES[randi() % RIG.ZOMBIES.size()])
+	B.root = R.node
+	B.neck = RIG.bone_node(R, "mixamorig_Neck")
+	B.head = RIG.bone_node(R, "mixamorig_Head")
+	B.stump = _m(B.neck, "stump", M.blood, Vector3(0, 0.08, 0), Vector3.ZERO, false)
+	B.stump.visible = false
+	(R.ap as AnimationPlayer).play("z_scream")
+
+
+## Mixamo body: clip from gait / attack / rise; hit flinch through the spine modifier.
+func _animate_skin(delta: float, moved: float) -> void:
+	var ap: AnimationPlayer = R.ap
+	var sp := moved / maxf(delta, 0.0001)
+	gait = lerpf(gait, sp, 1.0 - exp(-8.0 * delta))
+	hit_k = maxf(0.0, hit_k - delta * 4.0)
+	var clip := "z_idle"
+	var rate := 1.0
+	if rise_t > 0.0:
+		clip = "z_scream"
+	elif attack_t > 0.0:
+		clip = "z_attack"
+		rate = 1.6
+	elif gait > 0.25:
+		if gait_kind == 0:
+			clip = "z_walk"
+			rate = clampf(gait / 0.75, 0.6, 2.2)
+		else:
+			clip = "z_run"
+			rate = clampf(gait / 3.8, 0.65, 1.4)
+	if ap.current_animation != clip:
+		ap.play(clip, 0.2)
+	ap.speed_scale = rate
+	var aim: RIG.Aim = R.aim
+	aim.pitch = -hit_k * 0.45
+	aim.yaw = hit_dir * hit_k * 0.3
+
+
 func _build_body() -> void:
+	if RIG.available():
+		_build_skin()
+		return
 	var skin := _mat("skin")
 	var shirt := _mat("shirt")
 	var pants := _mat("pants")
@@ -296,10 +339,18 @@ func _die(head: bool) -> void:
 	collision_mask = 1
 	velocity = Vector3.ZERO
 	death_type = randi() % 2
+	if not R.is_empty():
+		var ap: AnimationPlayer = R.ap
+		ap.speed_scale = 1.0
+		ap.play("z_die" if death_type == 0 else ["die_back", "die_front"][randi() % 2], 0.12)
+		(R.aim as RIG.Aim).pitch = 0.0
+		(R.aim as RIG.Aim).yaw = 0.0
 	if head and randf() < 0.65:
 		headless = true
 		B.head.visible = false
 		B.stump.visible = true
+		if not R.is_empty():
+			(R.aim as RIG.Aim).head_off = true
 		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), Vector3.UP)
 		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), -transform.basis.z)
 	game.sfx.play3d("zdie%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -4.0)
@@ -381,6 +432,9 @@ func _leg_pose(ph: float, g: float) -> void:
 
 
 func _animate(delta: float, moved: float) -> void:
+	if not R.is_empty():
+		_animate_skin(delta, moved)
+		return
 	var sp := moved / maxf(delta, 0.0001)
 	gait = lerpf(gait, clampf(sp / 3.5, 0.0, 1.3), 1.0 - exp(-8.0 * delta))
 	phase += moved * (3.4 if gait_kind == 0 else 2.6)
@@ -410,6 +464,8 @@ func _animate(delta: float, moved: float) -> void:
 
 
 func _death_anim() -> void:
+	if not R.is_empty():
+		return
 	var r: Node3D = B.root
 	var t := dead_t
 	if death_type == 0:
@@ -433,8 +489,9 @@ func _remote_process(delta: float) -> void:
 		var k := 1.0 - maxf(0.0, rise_t) / 1.6
 		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
 		_animate(delta, 0.0)
-		B.shL.rotation.x = 2.6 - k * 1.2
-		B.shR.rotation.x = 2.8 - k * 1.4
+		if R.is_empty():
+			B.shL.rotation.x = 2.6 - k * 1.2
+			B.shR.rotation.x = 2.8 - k * 1.4
 		global_position = net_pos
 		return
 	B.root.position.y = 0.0
@@ -478,8 +535,9 @@ func _physics_process(delta: float) -> void:
 		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
 		B.root.rotation.z = sin(k * 9.0) * 0.12 * (1.0 - k)
 		_animate(delta, 0.0)
-		B.shL.rotation.x = 2.6 - k * 1.2
-		B.shR.rotation.x = 2.8 - k * 1.4
+		if R.is_empty():
+			B.shL.rotation.x = 2.6 - k * 1.2
+			B.shR.rotation.x = 2.8 - k * 1.4
 		return
 	B.root.position.y = 0.0
 	if not is_on_floor():

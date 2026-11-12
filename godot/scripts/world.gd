@@ -125,6 +125,88 @@ static func blk(parent: Node3D, x: float, y0: float, z: float, w: float, h: floa
 	return mi
 
 
+## Photoscanned props (Poly Haven, CC0): assets/models/<id>/<id>_1k.gltf, real-world scale.
+static var _scenes := {}
+static var _boxes := {}
+
+
+static func has_model(id: String) -> bool:
+	return not ("--noprops" in OS.get_cmdline_user_args()) and ResourceLoader.exists("res://assets/models/%s/%s_1k.gltf" % [id, id])
+
+
+static func model_box(id: String) -> AABB:
+	if _boxes.has(id):
+		return _boxes[id]
+	var n: Node3D = _scene(id).instantiate()
+	var box := AABB()
+	var first := true
+	var stack: Array = [[n, Transform3D.IDENTITY]]
+	while not stack.is_empty():
+		var it: Array = stack.pop_back()
+		var nd: Node = it[0]
+		var xf: Transform3D = it[1]
+		if nd is Node3D:
+			xf = xf * (nd as Node3D).transform
+		if nd is MeshInstance3D and (nd as MeshInstance3D).mesh:
+			var b: AABB = xf * (nd as MeshInstance3D).mesh.get_aabb()
+			box = b if first else box.merge(b)
+			first = false
+		for c in nd.get_children():
+			stack.append([c, xf])
+	n.free()
+	_boxes[id] = box
+	return box
+
+
+static func _scene(id: String) -> PackedScene:
+	if not _scenes.has(id):
+		_scenes[id] = load("res://assets/models/%s/%s_1k.gltf" % [id, id])
+	return _scenes[id]
+
+
+## Place a scanned model standing on y0 (scale `s`), optionally with a box collider that
+## matches its bounds (rotated with it) and a placement rect.
+static func prop(parent: Node3D, id: String, x: float, z: float, rot := 0.0, s := 1.0, y0 := 0.0, collide := true, tilt := Vector3.ZERO) -> Node3D:
+	var box := model_box(id)
+	var n: Node3D = _scene(id).instantiate()
+	n.set_meta("nomerge", true)
+	n.scale = Vector3.ONE * s
+	n.rotation = Vector3(tilt.x, rot, tilt.z)
+	n.position = Vector3(x, y0 - box.position.y * s, z)
+	parent.add_child(n)
+	# small props: no shadow map cost (the contact-shadow decal grounds them); all fade out far away
+	var small := box.size.y * s < 0.7 and maxf(box.size.x, box.size.z) * s < 1.3
+	var far := 45.0 if small else 85.0
+	var stack: Array = [n]
+	while not stack.is_empty():
+		var nd: Node = stack.pop_back()
+		stack.append_array(nd.get_children())
+		if nd is GeometryInstance3D:
+			var gi := nd as GeometryInstance3D
+			gi.visibility_range_end = far
+			gi.visibility_range_end_margin = 6.0
+			gi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+			gi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED   # props add nothing to SDFGI but cost voxelization
+			if small:
+				gi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if collide:
+		var size := box.size * s
+		var c := (box.position + box.size * 0.5) * s
+		var sb := StaticBody3D.new()
+		sb.rotation.y = rot
+		sb.position = Vector3(x, y0 - box.position.y * s, z) + Basis(Vector3.UP, rot) * c
+		var cs := CollisionShape3D.new()
+		var sh := BoxShape3D.new()
+		sh.size = size
+		cs.shape = sh
+		sb.add_child(cs)
+		parent.add_child(sb)
+		var ex := absf(cos(rot)) * size.x * 0.5 + absf(sin(rot)) * size.z * 0.5
+		var ez := absf(sin(rot)) * size.x * 0.5 + absf(cos(rot)) * size.z * 0.5
+		rects.append([sb.position.x - ex, sb.position.z - ez, sb.position.x + ex, sb.position.z + ez, y0 + size.y])
+	return n
+
+
 static func collider_only(parent: Node3D, c: Vector3, size: Vector3) -> void:
 	var sb := StaticBody3D.new()
 	sb.position = c
@@ -712,14 +794,40 @@ static func scatter_crates(root: Node3D, n: int, mat: Material, avoid: Vector3, 
 		var s := 1.6 if rng.randf() < 0.3 else 1.2
 		if Vector2(x - avoid.x, z - avoid.z).length() < 5 or not is_free(x, z, s / 2 + 1.4):
 			continue
-		blk(root, x, 0, z, s, s, s, mat, true, 0.06)
 		placed += 1
+		if has_model("wooden_crate_01"):
+			var top := _crate(root, x, z, s, 0.0)
+			if rng.randf() < 0.3:
+				_crate(root, x + rng.randf_range(-0.15, 0.15), z + rng.randf_range(-0.15, 0.15), 1.0, top)
+			continue
+		blk(root, x, 0, z, s, s, s, mat, true, 0.06)
 		if rng.randf() < 0.3:
 			blk(root, x + rng.randf_range(-0.15, 0.15), s, z + rng.randf_range(-0.15, 0.15), 1.0, 1.0, 1.0, mat, true, 0.06)
 
 
+## Stack of scanned crates about s metres wide and tall (the scans are flat, so cover height
+## comes from stacking, not from stretching them). Returns the top height.
+static func _crate(root: Node3D, x: float, z: float, s: float, y0: float) -> float:
+	var ids := ["wooden_crate_01", "wooden_crate_02", "wooden_military_crate", "wooden_military_crate"]
+	var id: String = ids[rng.randi() % ids.size()]
+	var b := model_box(id)
+	var k := clampf(s / maxf(b.size.x, b.size.z), 0.9, 1.6)
+	var rot := rng.randf_range(-0.15, 0.15) + (PI / 2 if rng.randf() < 0.5 else 0.0)
+	var y := y0
+	var layers := 0
+	while y - y0 < s * 0.85 and layers < 4:
+		prop(root, id, x + rng.randf_range(-0.04, 0.04), z + rng.randf_range(-0.04, 0.04), rot + rng.randf_range(-0.08, 0.08), k, y)
+		y += b.size.y * k
+		layers += 1
+	return y
+
+
 static func barrel(root: Node3D, x: float, z: float, col: Color) -> void:
 	if not is_free(x, z, 0.5):
+		return
+	if has_model("Barrel_01"):
+		var id: String = ["Barrel_01", "Barrel_02", "barrel_03"][rng.randi() % 3]
+		prop(root, id, x, z, rng.randf() * TAU, 0.92 / model_box(id).size.y)
 		return
 	var sb := StaticBody3D.new()
 	sb.position = Vector3(x, 0.45, z)
@@ -747,6 +855,11 @@ static func barrel(root: Node3D, x: float, z: float, col: Color) -> void:
 
 static func rock(root: Node3D, x: float, z: float, s: float, mat: Material) -> void:
 	if not is_free(x, z, s * 0.6):
+		return
+	if has_model("rock_07"):
+		var id: String = ["rock_07", "rock_09"][rng.randi() % 2]
+		var b := model_box(id)
+		prop(root, id, x, z, rng.randf() * TAU, s * 2.2 / maxf(b.size.x, b.size.z), -0.05)
 		return
 	var sm := SphereMesh.new()
 	sm.radius = s
@@ -1551,6 +1664,11 @@ static func cone(root: Node3D, x: float, z: float) -> void:
 static func jersey(root: Node3D, x: float, z: float, rot: float) -> void:
 	if not is_free(x, z, 1.1):
 		return
+	if has_model("concrete_road_barrier_02"):
+		var b := model_box("concrete_road_barrier_02")
+		var along_z := b.size.z > b.size.x
+		prop(root, "concrete_road_barrier_02", x, z, rot + (PI / 2 if along_z else 0.0), 1.15)
+		return
 	var conc := pbr("concrete_floor_01", Color(0.82, 0.8, 0.76), 0.6)
 	var n := Node3D.new()
 	n.position = Vector3(x, 0, z)
@@ -1564,6 +1682,16 @@ static func jersey(root: Node3D, x: float, z: float, rot: float) -> void:
 
 static func tires(root: Node3D, x: float, z: float) -> void:
 	if not is_free(x, z, 0.6):
+		return
+	if has_model("old_tyre"):
+		# the scan stands upright (axis along z): lay each one flat
+		var tb := model_box("old_tyre")
+		var k := 0.75 / tb.size.y
+		var nt := 1 + rng.randi() % 4
+		for i in nt:
+			var t := prop(root, "old_tyre", x + rng.randf_range(-0.05, 0.05), z + rng.randf_range(-0.05, 0.05), rng.randf() * TAU, k, 0.0, false, Vector3(PI / 2, 0, 0))
+			t.position.y = tb.size.z * k * (0.5 + i * 0.92)
+		_solid(root, x, z, Vector3(0.75, nt * tb.size.z * k * 0.92, 0.75))
 		return
 	var rub := colm(Color(0.05, 0.05, 0.05), 0.85)
 	var n := 1 + rng.randi() % 4
@@ -1579,6 +1707,12 @@ static func tires(root: Node3D, x: float, z: float) -> void:
 
 static func trash_bags(root: Node3D, x: float, z: float) -> void:
 	if not is_free(x, z, 0.7):
+		return
+	if has_model("trashbag"):
+		var b := model_box("trashbag")
+		for i in 2 + rng.randi() % 3:
+			prop(root, "trashbag", x + rng.randf_range(-0.45, 0.45), z + rng.randf_range(-0.45, 0.45), rng.randf() * TAU, rng.randf_range(0.6, 0.85) / b.size.y, 0.0, false)
+		rects.append([x - 0.6, z - 0.6, x + 0.6, z + 0.6, 0.6])
 		return
 	var bag := colm(Color(0.05, 0.06, 0.05), 0.3)
 	for i in 3 + rng.randi() % 3:
@@ -1744,6 +1878,13 @@ static func hay_bale(root: Node3D, x: float, z: float) -> void:
 static func gas_bottles(root: Node3D, x: float, z: float) -> void:
 	if not is_free(x, z, 0.5):
 		return
+	if has_model("propane_tank"):
+		var b := model_box("propane_tank")
+		for i in 2:
+			prop(root, "propane_tank", x + (i - 0.5) * 0.42, z, rng.randf() * TAU, 0.75 / b.size.y)
+		var j: String = ["metal_jerrycan", "metal_jerrycan_green"][rng.randi() % 2]
+		prop(root, j, x + rng.randf_range(-0.3, 0.3), z + 0.55, rng.randf_range(-0.5, 0.5), 0.47 / model_box(j).size.y)
+		return
 	var cols := [Color(0.7, 0.15, 0.1), Color(0.2, 0.35, 0.6), Color(0.85, 0.8, 0.75)]
 	for i in 3:
 		var c := CylinderMesh.new()
@@ -1836,7 +1977,69 @@ static func grass_tufts(root: Node3D, center: Vector3, half: Vector2, n: int, ti
 
 
 ## Per-map dressing, placed after the main layout so it only fills free space.
+## Small scanned clutter groups scattered on free ground (military kit, building-site junk).
+static func clutter(root: Node3D, i: int, half: float, n: int) -> void:
+	if not has_model("ammo_box"):
+		return
+	var kinds := ["ammo", "ammo", "generator", "cement", "cans", "trashcan", "boxes"]
+	if i == 1:
+		kinds = ["ammo", "ammo", "generator", "cans", "cans", "cement"]
+	elif i == 5 or i == 2:
+		kinds = ["ammo", "generator", "cans", "cement", "boxes"]
+	elif i == 6:
+		kinds = ["stump", "stump", "cans", "trashcan"]
+	var placed := 0
+	for t in 400:
+		if placed >= n:
+			break
+		var x := rng.randf_range(-half + 3, half - 3)
+		var z := rng.randf_range(-half + 3, half - 3)
+		if Vector2(x, z).length() < 6.0 or not is_free(x, z, 1.4):
+			continue
+		placed += 1
+		var r := rng.randf() * TAU
+		match kinds[rng.randi() % kinds.size()]:
+			"ammo":
+				var mc: String = ["wooden_military_crate", "old_military_crate"][rng.randi() % 2]
+				var b := model_box(mc)
+				var top := b.size.y * (1.1 / maxf(b.size.x, b.size.z))
+				prop(root, mc, x, z, r, 1.1 / maxf(b.size.x, b.size.z))
+				var ab := model_box("ammo_box")
+				prop(root, "ammo_box", x + cos(r) * 0.15, z - sin(r) * 0.15, r + rng.randf_range(-0.4, 0.4), 0.32 / maxf(ab.size.x, ab.size.z), top, false)
+				prop(root, "ammo_box", x + cos(r) * 0.9, z - sin(r) * 0.9 + 0.4, r + 0.3, 0.32 / maxf(ab.size.x, ab.size.z))
+			"generator":
+				var g := model_box("portable_generator")
+				prop(root, "portable_generator", x, z, r, 0.75 / maxf(g.size.x, g.size.z))
+				var j: String = ["metal_jerrycan", "metal_jerrycan_green"][rng.randi() % 2]
+				prop(root, j, x + cos(r + 1.2) * 0.8, z - sin(r + 1.2) * 0.8, r, 0.47 / model_box(j).size.y)
+			"cement":
+				var c := model_box("cement_bag")
+				var k := 0.75 / maxf(c.size.x, c.size.z)
+				var y := 0.0
+				for layer in 2 + rng.randi() % 3:
+					prop(root, "cement_bag", x + rng.randf_range(-0.05, 0.05), z + rng.randf_range(-0.05, 0.05), r + rng.randf_range(-0.2, 0.2), k, y, layer == 0)
+					y += c.size.y * k * 0.92
+				rects[rects.size() - 1][4] = y
+			"cans":
+				for q in 2 + rng.randi() % 3:
+					var j: String = ["metal_jerrycan", "metal_jerrycan_green"][rng.randi() % 2]
+					prop(root, j, x + rng.randf_range(-0.5, 0.5), z + rng.randf_range(-0.5, 0.5), rng.randf() * TAU, 0.47 / model_box(j).size.y, 0.0, q == 0)
+			"trashcan":
+				var tc := model_box("metal_trash_can")
+				prop(root, "metal_trash_can", x, z, r, 0.95 / tc.size.y)
+			"boxes":
+				var cb := model_box("cardboard_box_01")
+				var k2 := 0.55 / maxf(cb.size.x, cb.size.z)
+				prop(root, "cardboard_box_01", x, z, r, k2)
+				prop(root, "cardboard_box_01", x + 0.6, z + 0.2, r + 0.4, k2 * 0.85, 0.0, false)
+				prop(root, "cardboard_box_01", x + 0.1, z + 0.05, r + 0.2, k2 * 0.8, cb.size.y * k2, false)
+			"stump":
+				var st := model_box("tree_stump_01")
+				prop(root, "tree_stump_01", x, z, r, 1.0 / maxf(st.size.x, st.size.z), -0.05)
+
+
 static func dress(root: Node3D, i: int) -> void:
+	clutter(root, i, 52.0 if MAPS[i].mode != "zombies" else 34.0, 14 if MAPS[i].mode != "zombies" else 10)
 	match i:
 		0:
 			for q in [[6.2, -26], [-6.2, -6], [6.2, 20], [-6.2, 32], [20, -15], [-24, -18], [36, -14.5], [-40, -19.5]]:
