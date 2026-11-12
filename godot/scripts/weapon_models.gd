@@ -64,7 +64,6 @@ static func glass() -> StandardMaterial3D:
 		_glass.roughness = 0.05
 		_glass.metallic_specular = 0.9
 		_glass.cull_mode = BaseMaterial3D.CULL_DISABLED
-		_glass.shadow_enabled = false
 	return _glass
 
 

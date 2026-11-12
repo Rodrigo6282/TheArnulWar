@@ -16,7 +16,8 @@ var installer_url := ""
 var installer_size := 0
 var page_url := ""
 var newer := false
-var dismissed := false
+var last_check := -1.0e9
+var enabled := true
 var downloading := false
 var _req: HTTPRequest
 var _dl: HTTPRequest
@@ -46,14 +47,23 @@ func _ready() -> void:
 			return
 	# no network calls from the automated checks
 	for a in args:
-		if a.begins_with("--autotest") or a.begins_with("--shot") or a.begins_with("--perf") or a.begins_with("--mptest") or a == "--noupdate":
+		if a.begins_with("--autotest") or a.begins_with("--shot") or a.begins_with("--perf") or a.begins_with("--mptest") or a.ends_with("test") or a == "--noupdate":
+			enabled = false
 			return
 	check()
+
+
+## Back in the menu: look again if the last check is older than 10 minutes (a release published
+## while the game was open is caught too).
+func recheck() -> void:
+	if enabled and not newer and Time.get_ticks_msec() / 1000.0 - last_check > 600.0:
+		check()
 
 
 func check() -> void:
 	if _req:
 		return
+	last_check = Time.get_ticks_msec() / 1000.0
 	_req = HTTPRequest.new()
 	_req.timeout = 15.0
 	add_child(_req)

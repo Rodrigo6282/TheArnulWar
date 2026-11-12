@@ -330,9 +330,9 @@ func _build_menu() -> void:
 	vb.add_child(ver)
 	if game.updater:
 		game.updater.found.connect(func():
-			ver.text += "  ·  nueva versión %s disponible (MULTIJUGADOR > Actualizar)" % game.updater.latest
+			ver.text = "Versión %s  ·  nueva versión %s: actualización obligatoria" % [game.updater.current, game.updater.latest]
 			ver.add_theme_color_override("font_color", GOLD)
-			if mp_p and mp_p.visible:
+			if game.state == "menu":
 				show_update()
 		)
 	sync_settings()
@@ -957,11 +957,12 @@ func show_mp() -> void:
 	mp_p.visible = true
 	mp_stat.text = ""
 	mp_name.text = game.settings.get("name", "Jugador")
-	if game.updater and game.updater.newer and not game.updater.dismissed:
+	if game.updater and game.updater.newer:
 		show_update()
 
 
-## "New version" window (updater.gd): online play needs the same version on every PC.
+## "New version" window (updater.gd): updating is mandatory (online play needs the same version on
+## every PC), so it covers everything and only offers ACTUALIZAR or quitting.
 func show_update() -> void:
 	var u = game.updater
 	if upd_p == null:
@@ -985,10 +986,7 @@ func show_update() -> void:
 			upd_msg.text = "Descargando la versión %s..." % game.updater.latest
 			game.updater.download()
 		)
-		_button(row, "Más tarde", func():
-			game.updater.dismissed = true
-			upd_p.visible = false
-		, true)
+		_button(row, "Salir del juego", func(): game.get_tree().quit(), true)
 		u.progress.connect(func(done: int, total: int):
 			var pct := 100.0 * done / maxf(1.0, total)
 			upd_msg.text = "Descargando la versión %s...  %d %%  (%d / %d MB)
@@ -999,9 +997,12 @@ Al terminar se abrirá el instalador y el juego se cerrará." % [game.updater.la
 			upd_btn.disabled = false
 		)
 	upd_msg.text = "Ya está disponible la versión %s (tienes la %s).
-Para jugar online todos necesitáis la misma versión.
+Para seguir jugando hay que actualizar: todos los jugadores deben tener la misma versión.
 
-¿Actualizar ahora? Se descargará el instalador (%d MB), se abrirá y el juego se cerrará. Tu progreso se conserva." % [u.latest, u.current, maxi(1, u.installer_size / 1048576)]
+Al pulsar ACTUALIZAR se descargará el instalador (%d MB), se abrirá y el juego se cerrará. Tu progreso se conserva." % [u.latest, u.current, maxi(1, u.installer_size / 1048576)]
+	menu.visible = false
+	if mp_p:
+		mp_p.visible = false
 	upd_btn.disabled = u.downloading
 	upd_p.visible = true
 	root.move_child(upd_p, root.get_child_count() - 1)
@@ -1027,6 +1028,11 @@ func show_menu() -> void:
 	over_p.visible = false
 	hud.visible = false
 	sync_settings()
+	if game.updater:
+		if game.updater.newer:
+			show_update()
+		else:
+			game.updater.recheck()
 
 
 func show_hud() -> void:
@@ -1146,7 +1152,17 @@ func _draw_minimap() -> void:
 		var ex: float = e.global_position.x - px
 		var ez: float = e.global_position.z - pz
 		if e.get("puppet") == true and game.net.is_ally(e.peer_id):
-			mini.draw_circle(Vector2(ex, ez), 1.4, Color(0.35, 0.65, 1.0))
+			# teammate: green arrow pointing where they look (blue dots are perks / the box)
+			var f: float = e.facing
+			var fw := Vector2(-sin(f), -cos(f))
+			var sd := Vector2(-fw.y, fw.x)
+			var cp := Vector2(ex, ez)
+			# out of range: pinned to the edge so you always know which way they are
+			var lim: float = MINI_RANGE * 0.9
+			if cp.length() > lim:
+				cp = cp.normalized() * lim
+			mini.draw_circle(cp, 2.3, Color(0.0, 0.0, 0.0, 0.55))
+			mini.draw_colored_polygon(PackedVector2Array([cp + fw * 2.6, cp - fw * 1.5 + sd * 1.7, cp - fw * 0.6, cp - fw * 1.5 - sd * 1.7]), Color(0.3, 1.0, 0.45))
 			continue
 		var seen: bool = game.radar_t > 0.0
 		if not seen:

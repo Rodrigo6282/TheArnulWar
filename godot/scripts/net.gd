@@ -893,3 +893,17 @@ func zzz_bad_version(host_ver: String) -> void:
 		msg += " Pulsa ACTUALIZAR."
 		game.ui.show_update()
 	game.ui.mp_status(msg)
+
+
+## Explosive barrel blown up here: the others remove theirs (effects come with net.boom).
+## New RPCs go at the end of the file with a "zzzz_" prefix so the ids of hello / zzz_bad_version
+## never move (an older version must still get the "update" message).
+func zzzz_barrel_send(id: int) -> void:
+	rpc("zzzz_barrel_gone", id)
+
+
+@rpc("any_peer", "reliable")
+func zzzz_barrel_gone(id: int) -> void:
+	for b in get_tree().get_nodes_in_group("xbarrel"):
+		if b.bid == id:
+			b.remove_quiet()

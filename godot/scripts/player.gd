@@ -12,6 +12,7 @@ var game
 var head: Node3D
 var camera: Camera3D
 var holder: Node3D
+var test_iz := 0.0           # automated checks: held "forward" input
 var fp_arms = null          # fp_arms.gd: Mixamo arms with IK (null = modelled hands)
 var shape: CollisionShape3D
 var cap: CapsuleShape3D
@@ -276,7 +277,7 @@ func _physics_process(delta: float) -> void:
 	var crouching := Input.is_physical_key_pressed(KEY_C) and in_ctrl
 	crouch = lerpf(crouch, 1.0 if crouching else 0.0, 1.0 - exp(-12.0 * delta))
 	var ix := float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
-	var iz := float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
+	var iz := float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S)) + test_iz
 	if not in_ctrl:
 		ix = 0.0
 		iz = 0.0
@@ -696,7 +697,10 @@ func fire() -> void:
 			dmg_map[col][0] += dmg
 			if is_head:
 				dmg_map[col][1] = true
-			game.fx.blood(hit.position, -dir)
+			if col.has_meta("barrel"):
+				game.fx.impact(hit.position, hit.normal, false, p < 2)
+			else:
+				game.fx.blood(hit.position, -dir)
 			for h2 in extra:
 				var c2 = h2.collider
 				if not dmg_map.has(c2):

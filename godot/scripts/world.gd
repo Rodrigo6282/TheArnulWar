@@ -257,16 +257,16 @@ static func is_free(x: float, z: float, r: float) -> bool:
 
 
 ## Wall along an axis with door ('d') and window ('w') openings: gaps = [[center, type], ...]
-static func wall_gaps(p: Node3D, a0: float, a1: float, fixed: float, axis: String, h: float, t: float, gaps: Array, mat: Material) -> void:
+static func wall_gaps(p: Node3D, a0: float, a1: float, fixed: float, axis: String, h: float, t: float, gaps: Array, mat: Material, y0 := 0.0) -> void:
 	gaps.sort_custom(func(a, b): return a[0] < b[0])
 	var cur := a0
 	var seg := func(s: float, e: float, y: float, hh: float) -> void:
 		if e - s < 0.05 or hh <= 0.01:
 			return
 		if axis == "x":
-			blk(p, (s + e) * 0.5, y, fixed, e - s, hh, t, mat)
+			blk(p, (s + e) * 0.5, y0 + y, fixed, e - s, hh, t, mat)
 		else:
-			blk(p, fixed, y, (s + e) * 0.5, t, hh, e - s, mat)
+			blk(p, fixed, y0 + y, (s + e) * 0.5, t, hh, e - s, mat)
 	for g in gaps:
 		var gw: float = 2.4 if g[1] == "d" else 1.6
 		seg.call(cur, g[0] - gw * 0.5, 0.0, h)
@@ -298,6 +298,116 @@ static func building(p: Node3D, cx: float, cz: float, w: float, d: float, h: flo
 		blk(p, side[0], h, side[1], side[2], 0.16, side[3], trim, false)
 	if night and rng.randf() < 0.6:
 		lamp_light(p, Vector3(cx, h * 0.7, cz), Color(1.0, 0.68, 0.38), 1.8, maxf(w, d) * 0.9)
+
+
+## Two-storey house: ground floor (doors), a stepped ramp along the north wall up through a
+## stairwell in the first-floor slab (guard rail around it), upper floor with windows, roof.
+## Characters walk ramps (not loose steps), so the stairs are a sloped collider under visual steps;
+## the navigation mesh bakes it too, so soldiers go upstairs as well.
+static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: Dictionary, wins: Dictionary, mat: Material, trim: Material, roofm: Material, floor_m: Material) -> void:
+	var t := 0.4
+	var h1 := 3.4
+	var slab := 0.25
+	var h2 := 3.0
+	var fy := h1 + slab
+	var x0 := cx - w * 0.5
+	var x1 := cx + w * 0.5
+	var z0 := cz - d * 0.5
+	var z1 := cz + d * 0.5
+	var conv := func(arr, c):
+		var out := []
+		for o in arr:
+			out.append([c + o[0], o[1]])
+		return out
+	for lv in [[0.0, h1, doors], [fy, h2, wins]]:
+		var dd: Dictionary = lv[2]
+		wall_gaps(p, x0, x1, z0, "x", lv[1], t, conv.call(dd.get("n", []), cx), mat, lv[0])
+		wall_gaps(p, x0, x1, z1, "x", lv[1], t, conv.call(dd.get("s", []), cx), mat, lv[0])
+		wall_gaps(p, z0 + t * 0.5, z1 - t * 0.5, x0, "z", lv[1], t, conv.call(dd.get("w", []), cz), mat, lv[0])
+		wall_gaps(p, z0 + t * 0.5, z1 - t * 0.5, x1, "z", lv[1], t, conv.call(dd.get("e", []), cz), mat, lv[0])
+	# floor band between the storeys
+	for side in [[cx, z0, w + 0.16, t + 0.16], [cx, z1, w + 0.16, t + 0.16], [x0, cz, t + 0.16, d], [x1, cz, t + 0.16, d]]:
+		blk(p, side[0], h1, side[1], side[2], slab, side[3], trim, false)
+	# first-floor slab with the stairwell (NW) left open
+	var ix0 := x0 + t * 0.5
+	var ix1 := x1 - t * 0.5
+	var iz0 := z0 + t * 0.5
+	var iz1 := z1 - t * 0.5
+	var run := 6.0
+	var hx1 := ix0 + run + 0.4
+	var hz1 := iz0 + 1.5
+	blk(p, (hx1 + ix1) * 0.5, h1, (iz0 + iz1) * 0.5, ix1 - hx1, slab, iz1 - iz0, floor_m)
+	rects.pop_back()
+	blk(p, (ix0 + hx1) * 0.5, h1, (hz1 + iz1) * 0.5, hx1 - ix0, slab, iz1 - hz1, floor_m)
+	rects.pop_back()
+	# rail along the open side of the stairwell
+	blk(p, (ix0 + hx1) * 0.5 - 0.3, fy, hz1 + 0.05, hx1 - ix0 - 0.6, 1.0, 0.1, trim)
+	rects.pop_back()
+	# stairs: sloped collider + visual steps
+	var xa := ix0 + 0.4
+	var zc := iz0 + 0.75
+	var rise := fy
+	var ang := atan2(rise, hx1 - xa)
+	var ln := sqrt(rise * rise + (hx1 - xa) * (hx1 - xa))
+	var sb := StaticBody3D.new()
+	sb.position = Vector3((xa + hx1) * 0.5, rise * 0.5 - 0.1 * cos(ang), zc)
+	sb.rotation.z = ang
+	var cs := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(ln, 0.2, 1.4)
+	cs.shape = bs
+	sb.add_child(cs)
+	p.add_child(sb)
+	var n := 15
+	var sw := (hx1 - xa) / n
+	for k in n:
+		blk(p, xa + sw * (k + 0.5), 0.0, zc, sw + 0.01, rise * (k + 1) / n, 1.4, floor_m, false)
+	rects.append([xa, zc - 0.7, hx1, zc + 0.7, rise])
+	# roof
+	var top := fy + h2
+	blk(p, cx, top, cz, w + 0.3, 0.25, d + 0.3, roofm)
+	rects.pop_back()
+	for side in [[cx, z0, w + 0.3, 0.25], [cx, z1, w + 0.3, 0.25], [x0, cz, 0.25, d], [x1, cz, 0.25, d]]:
+		blk(p, side[0], top + 0.25, side[1], side[2], 0.35, side[3], trim, false)
+	if night:
+		lamp_light(p, Vector3(cx + 2.0, h1 * 0.75, cz + 1.0), Color(1.0, 0.68, 0.38), 1.6, maxf(w, d) * 0.8)
+		lamp_light(p, Vector3(cx + 2.0, fy + h2 * 0.75, cz + 1.0), Color(1.0, 0.7, 0.42), 1.4, maxf(w, d) * 0.8)
+	furnish(p, ix0, iz0, ix1, iz1, 0.0, true)
+	furnish(p, ix0, iz0, ix1, iz1, fy, true)
+
+
+## Prop placed by the centre of its bounds (so it can be lined up against walls).
+static func prop_c(p: Node3D, id: String, cx: float, cz: float, rot: float, s := 1.0, y0 := 0.0, collide := true) -> void:
+	var b := model_box(id)
+	var c := (b.position + b.size * 0.5) * s
+	var off := Basis(Vector3.UP, rot) * Vector3(c.x, 0, c.z)
+	prop(p, id, cx - off.x, cz - off.z, rot, s, y0, collide)
+
+
+## Furniture for a room (interior bounds), standing on y. skip_nw keeps the stair corner clear.
+static func furnish(p: Node3D, ix0: float, iz0: float, ix1: float, iz1: float, y: float, skip_nw := false) -> void:
+	if not has_model("wooden_bookshelf_worn"):
+		return
+	var cx := (ix0 + ix1) * 0.5
+	var cz := (iz0 + iz1) * 0.5
+	var bs := model_box("wooden_bookshelf_worn")
+	prop_c(p, "wooden_bookshelf_worn", ix1 - bs.size.x * 0.5 - 0.1, iz1 - bs.size.z * 0.5 - 0.05, PI, 1.0, y)
+	var cb := model_box("painted_wooden_cabinet")
+	prop_c(p, "painted_wooden_cabinet", ix0 + cb.size.x * 0.5 + 0.1, iz1 - cb.size.z * 0.5 - 0.05, PI, 1.0, y)
+	var sh := model_box("Shelf_01")
+	prop_c(p, "Shelf_01", ix1 - sh.size.x * 0.5 - 0.15, iz0 + sh.size.z * 0.5 + 0.05, 0.0, 1.0, y)
+	if y < 0.5:
+		prop_c(p, "WoodenTable_03", cx + 0.6, cz + 0.6, 0.0, 1.0, y)
+		for k in [-1.0, 1.0]:
+			prop_c(p, "SchoolChair_01", cx + 0.6 + k * 0.35, cz + 0.6 - 0.75, PI + rng.randf_range(-0.3, 0.3), 1.0, y, false)
+		prop_c(p, "SchoolChair_01", cx + 0.6, cz + 1.4, rng.randf_range(-0.4, 0.4), 1.0, y, false)
+	else:
+		prop_c(p, "metal_office_desk", cx + 1.0, cz + 0.8, 0.0, 1.0, y)
+		prop_c(p, "SchoolChair_01", cx + 1.0, cz + 0.8 - 0.8, PI, 1.0, y, false)
+		for k in 2:
+			prop_c(p, "cardboard_box_01", ix1 - 0.5 - k * 0.55, cz - 0.4, rng.randf() * 0.4, 1.0, y + (0.0 if k == 0 else 0.0))
+	if not skip_nw:
+		prop_c(p, "plastic_crate_02", ix0 + 0.5, iz0 + 0.45, 0.2, 1.0, y)
 
 
 static func car(p: Node3D, x: float, z: float, rot: float, paint: Color, burning: bool, fx_list: Array) -> void:
@@ -570,11 +680,20 @@ static func build_city(root: Node3D) -> Array:
 		var d := rng.randf_range(10, 25)
 		blk(root, cos(a) * r, 0, sin(a) * r, w, h, d, dark, false)
 	# buildings
-	building(root, -30, -30, 16, 12, 4, {"n": [[0, "d"]], "e": [[0, "d"]], "s": [[-4, "w"], [4, "w"]], "w": [[0, "w"]]}, brick, dark)
+	# two-storey houses (stairs inside) and roofed single-storey ones, all furnished
+	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
+	var roof_m := pbr("concrete_floor_01", Color(0.55, 0.55, 0.56), 0.5)
+	house2(root, -30, -30, 16, 12, {"n": [[0, "d"]], "e": [[0, "d"]], "s": [[-4, "w"], [4, "w"]], "w": [[0, "w"]]},
+		{"n": [[3, "w"]], "s": [[-4, "w"], [4, "w"]], "e": [[0, "w"]], "w": [[2, "w"]]}, brick, dark, roof_m, planks)
 	building(root, 30, -28, 14, 14, 4.5, {"w": [[2, "d"]], "s": [[-3, "d"]], "n": [[-3, "w"], [3, "w"]], "e": [[0, "w"]]}, wall, dark)
+	roof(root, 30, -28, 14, 14, 4.5, roof_m)
+	furnish(root, 23.2, -34.8, 36.8, -21.2, 0.0)
 	wall_gaps(root, -34.6, -21.4, 30, "z", 4.5, 0.3, [[-28, "d"]], wall)
 	building(root, -28, 30, 18, 10, 4, {"e": [[0, "d"]], "n": [[-5, "d"]], "s": [[5, "d"]], "w": [[0, "w"]]}, wall, dark)
-	building(root, 32, 32, 12, 16, 4, {"w": [[-3, "d"]], "n": [[0, "d"]], "s": [[0, "w"]], "e": [[2, "w"]]}, brick, dark)
+	roof(root, -28, 30, 18, 10, 4, roof_m)
+	furnish(root, -36.8, 25.2, -19.2, 34.8, 0.0)
+	house2(root, 32, 32, 12, 16, {"w": [[-3, "d"]], "n": [[3.5, "d"]], "s": [[0, "w"]], "e": [[2, "w"]]},
+		{"n": [[3, "w"]], "s": [[0, "w"]], "e": [[-3, "w"], [3, "w"]], "w": [[2, "w"]]}, brick, dark, roof_m, planks)
 	blk(root, 0, 0, -45, 20, 10, 8, dark, true, 0.3)
 	blk(root, -50, 0, 0, 8, 8, 20, dark, true, 0.3)
 	blk(root, 50, 0, 0, 8, 9, 18, dark, true, 0.3)
@@ -700,6 +819,7 @@ static var zlayout := {}
 
 static func build(i: int, root: Node3D, names := {}) -> Array:
 	rects.clear()
+	_xb_count = 0
 	zlayout = {}
 	H = 60.0
 	night = ENVS[MAPS[i].env].night
@@ -822,12 +942,39 @@ static func _crate(root: Node3D, x: float, z: float, s: float, y0: float) -> flo
 	return y
 
 
+const XB := preload("res://scripts/xbarrel.gd")
+static var _xb_count := 0
+
+
+## Explosive barrel: the scanned model inside a damageable body (xbarrel.gd).
+static func xbarrel(root: Node3D, x: float, z: float) -> void:
+	var sb: StaticBody3D = XB.new()
+	sb.bid = _xb_count
+	_xb_count += 1
+	sb.position = Vector3(x, 0, z)
+	root.add_child(sb)
+	var k := 0.92 / model_box("Barrel_01").size.y
+	prop(sb, "Barrel_01", 0.0, 0.0, rng.randf() * TAU, k, 0.0, false)
+	var cs := CollisionShape3D.new()
+	var cy := CylinderShape3D.new()
+	cy.radius = 0.3
+	cy.height = 0.92
+	cs.shape = cy
+	cs.position.y = 0.46
+	sb.add_child(cs)
+	rects.append([x - 0.32, z - 0.32, x + 0.32, z + 0.32, 0.92])
+
+
 static func barrel(root: Node3D, x: float, z: float, col: Color) -> void:
 	if not is_free(x, z, 0.5):
 		return
 	if has_model("Barrel_01"):
-		var id: String = ["Barrel_01", "Barrel_02", "barrel_03"][rng.randi() % 3]
-		prop(root, id, x, z, rng.randf() * TAU, 0.92 / model_box(id).size.y)
+		# Barrel_01 carries the flammable label: those explode when shot (xbarrel.gd)
+		var id: String = ["Barrel_01", "Barrel_01", "Barrel_02", "barrel_03"][rng.randi() % 4]
+		if id == "Barrel_01":
+			xbarrel(root, x, z)
+		else:
+			prop(root, id, x, z, rng.randf() * TAU, 0.92 / model_box(id).size.y)
 		return
 	var sb := StaticBody3D.new()
 	sb.position = Vector3(x, 0.45, z)
@@ -1059,10 +1206,20 @@ static func build_desert(root: Node3D) -> Array:
 		[16, 14, 8, 8, 3.4, {"w": [[0, "d"]], "n": [[0, "w"]]}],
 		[-17, 16, 7, 7, 3.2, {"n": [[0, "d"]], "e": [[0, "w"]]}],
 		[18, -17, 7, 8, 3.2, {"s": [[0, "d"]], "w": [[0, "w"]]}]]
-	for hh in houses:
+	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
+	for hi in houses.size():
+		var hh: Array = houses[hi]
 		var m: Material = adobe if rng.randf() < 0.6 else adobe2
+		if hi == 0 or hi == 3:
+			# two storeys: the north door moves aside for the stairs
+			var dd: Dictionary = (hh[5] as Dictionary).duplicate(true)
+			dd["n"] = [[2.6 if hi == 0 else 3.5, "d"]]
+			house2(root, hh[0], hh[1], hh[2], hh[3], dd, {"s": [[-3, "w"], [3, "w"]], "e": [[0, "w"]], "w": [[1, "w"]], "n": [[3, "w"]]}, m, trim, trim, planks)
+			continue
 		building(root, hh[0], hh[1], hh[2], hh[3], hh[4], hh[5], m, trim)
 		roof(root, hh[0], hh[1], hh[2], hh[3], hh[4], trim)
+		if hh[2] >= 10.0 and hh[3] >= 9.0:
+			furnish(root, hh[0] - hh[2] * 0.5 + 0.2, hh[1] - hh[3] * 0.5 + 0.2, hh[0] + hh[2] * 0.5 - 0.2, hh[1] + hh[3] * 0.5 - 0.2, 0.0)
 	# low adobe cover walls
 	for q in [[-8, 8, 5, 0.5], [9, 6, 0.5, 4], [-36, -14, 6, 0.5], [36, -12, 0.5, 6], [-40, 40, 6, 0.5], [40, 42, 0.5, 6], [0, 22, 6, 0.5], [-24, 0, 0.5, 5], [24, -2, 0.5, 5]]:
 		blk(root, q[0], 0, q[1], q[2], 1.25, q[3], adobe2, true, 0.12)
@@ -1981,13 +2138,13 @@ static func grass_tufts(root: Node3D, center: Vector3, half: Vector2, n: int, ti
 static func clutter(root: Node3D, i: int, half: float, n: int) -> void:
 	if not has_model("ammo_box"):
 		return
-	var kinds := ["ammo", "ammo", "generator", "cement", "cans", "trashcan", "boxes"]
+	var kinds := ["ammo", "ammo", "generator", "cement", "cans", "trashcan", "boxes", "tools", "plastic", "wheels", "lpg", "ladder"]
 	if i == 1:
-		kinds = ["ammo", "ammo", "generator", "cans", "cans", "cement"]
+		kinds = ["ammo", "ammo", "generator", "cans", "cans", "cement", "plastic", "wheels", "compost", "lpg"]
 	elif i == 5 or i == 2:
-		kinds = ["ammo", "generator", "cans", "cement", "boxes"]
+		kinds = ["ammo", "generator", "cans", "cement", "boxes", "tools", "plastic", "lpg", "ladder"]
 	elif i == 6:
-		kinds = ["stump", "stump", "cans", "trashcan"]
+		kinds = ["stump", "stump", "cans", "trashcan", "compost", "wheels", "ladder"]
 	var placed := 0
 	for t in 400:
 		if placed >= n:
@@ -2036,10 +2193,39 @@ static func clutter(root: Node3D, i: int, half: float, n: int) -> void:
 			"stump":
 				var st := model_box("tree_stump_01")
 				prop(root, "tree_stump_01", x, z, r, 1.0 / maxf(st.size.x, st.size.z), -0.05)
+			"tools":
+				if has_model("metal_tool_chest"):
+					prop(root, "metal_tool_chest", x, z, r)
+					prop(root, "hand_truck", x + cos(r) * 0.9, z - sin(r) * 0.9, r + 0.5)
+					prop(root, "oil_tin", x + 0.4, z + 0.5, rng.randf() * TAU, 1.0, 0.0, false)
+			"plastic":
+				if has_model("plastic_crate_02"):
+					var pc := model_box("plastic_crate_02")
+					for k in 1 + rng.randi() % 3:
+						prop(root, "plastic_crate_02", x + rng.randf_range(-0.04, 0.04), z, r + rng.randf_range(-0.15, 0.15), 1.0, pc.size.y * k, k == 0)
+					prop(root, "industrial_pastic_container", x + 0.7, z + 0.2, r + 0.3)
+			"wheels":
+				if has_model("rusted_wheel_rim_01"):
+					for k in 2:
+						var t2 := prop(root, "rusted_wheel_rim_01", x + k * 0.5, z, rng.randf() * TAU, 1.0, 0.0, false, Vector3(PI / 2, 0, 0))
+						t2.position.y = 0.08
+					tires(root, x - 0.9, z + 0.4)
+					prop(root, "oil_tin", x + 0.3, z + 0.6, rng.randf() * TAU, 1.0, 0.0, false)
+			"lpg":
+				if has_model("small_lpg_tank"):
+					for k in 2 + rng.randi() % 2:
+						prop(root, "small_lpg_tank", x + (k - 1) * 0.45, z + rng.randf_range(-0.1, 0.1), rng.randf() * TAU, 1.0, 0.0, k == 0)
+			"ladder":
+				if has_model("wooden_ladder"):
+					prop(root, "wooden_ladder", x, z, r)
+					prop(root, "cement_bag", x + 0.9, z + 0.2, r, 1.0)
+			"compost":
+				if has_model("compost_bags"):
+					prop(root, "compost_bags", x, z, r)
 
 
 static func dress(root: Node3D, i: int) -> void:
-	clutter(root, i, 52.0 if MAPS[i].mode != "zombies" else 34.0, 14 if MAPS[i].mode != "zombies" else 10)
+	clutter(root, i, 52.0 if MAPS[i].mode != "zombies" else 34.0, 24 if MAPS[i].mode != "zombies" else 15)
 	match i:
 		0:
 			for q in [[6.2, -26], [-6.2, -6], [6.2, 20], [-6.2, 32], [20, -15], [-24, -18], [36, -14.5], [-40, -19.5]]:

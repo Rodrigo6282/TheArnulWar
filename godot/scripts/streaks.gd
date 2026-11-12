@@ -268,6 +268,9 @@ func _update_heli(c: Dictionary, n: Node3D, delta: float, pl) -> void:
 		for e in game.enemies:
 			if not is_instance_valid(e) or e.dead or (e.get("rise_t") != null and e.rise_t > 0.0):
 				continue
+			# never target teammates (co-op zombies / team deathmatch)
+			if e.get("puppet") == true and game.net.is_ally(e.peer_id):
+				continue
 			var ep: Vector3 = e.global_position + Vector3(0, 1.2, 0)
 			var d := ep.distance_to(n.global_position)
 			if d >= best:

@@ -133,6 +133,8 @@ func _ready() -> void:
 		_mptest(arg_value("--mptest"))
 	elif has_arg("--climbtest"):
 		_climbtest()
+	elif has_arg("--stairtest"):
+		_stairtest()
 	elif has_arg("--onlinetest"):
 		_onlinetest()
 
@@ -928,9 +930,15 @@ func explode(pos: Vector3, dmg: float, radius: float, kind: String) -> void:
 	if net.active:
 		net.boom(pos, radius)
 	var space := world.get_world_3d().direct_space_state
+	# explosive barrels nearby go off too (short fuse = chain reaction)
+	for b in get_tree().get_nodes_in_group("xbarrel"):
+		if is_instance_valid(b) and not b.gone and b.global_position.distance_to(pos) < radius * 0.8:
+			b.take_damage(1000.0)
 	var n_kill := 0
 	for e in enemies.duplicate():
 		if not is_instance_valid(e) or e.dead:
+			continue
+		if e.get("puppet") == true and net.is_ally(e.peer_id):
 			continue
 		var c: Vector3 = e.global_position + Vector3(0, 1.0, 0)
 		var d := c.distance_to(pos + Vector3(0, 0.4, 0))
@@ -948,7 +956,7 @@ func explode(pos: Vector3, dmg: float, radius: float, kind: String) -> void:
 	if player and player.alive:
 		var pd := player.global_position.distance_to(pos)
 		player.shake = maxf(player.shake, clampf(1.2 - pd / 30.0, 0.0, 1.0))
-		if pd < radius * 0.9 and kind == "grenade":
+		if pd < radius * 0.9 and (kind == "grenade" or kind == "barrel"):
 			var q2 := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 0.4, 0), player.global_position + Vector3(0, 1.0, 0), 1)
 			if space.intersect_ray(q2).is_empty():
 				player.take_damage(dmg * 0.55 * (1.0 - pd / radius), pos)
@@ -1207,6 +1215,49 @@ func _onlinetest() -> void:
 	get_tree().quit()
 
 ## Climb / vault / death-reset checks on an open spot of map 0 (headless).
+## Walk up the stairs of the two-storey houses (city + desert) with the normal movement.
+func _stairtest() -> void:
+	await get_tree().process_frame
+	var log := []
+	for t in [[0, Vector3(-37.2, 0.2, -35.05)], [0, Vector3(26.4, 0.2, 24.95)], [1, Vector3(-36.2, 0.2, -36.05)], [1, Vector3(24.4, 0.2, 23.95)]]:
+		settings["map"] = t[0]
+		load_map(t[0])
+		start_game()
+		intermission = 999.0
+		player.god = true
+		await get_tree().create_timer(0.5).timeout
+		player.global_position = t[1]
+		player.velocity = Vector3.ZERO
+		player.yaw = -PI / 2
+		player.test_iz = 1.0
+		await get_tree().create_timer(2.6).timeout
+		player.test_iz = 0.0
+		await get_tree().create_timer(0.4).timeout
+		log.append("map%d y=%.2f x=%.1f" % [t[0], player.global_position.y, player.global_position.x])
+	# explosive barrels: shoot one (as the player's gun does) and watch it go off
+	load_map(2)
+	start_game()
+	intermission = 999.0
+	player.god = true
+	await get_tree().create_timer(0.5).timeout
+	var bs: Array = get_tree().get_nodes_in_group("xbarrel")
+	var n0 := bs.size()
+	if n0 > 0:
+		var b = bs[0]
+		var e = SoldierScript.new()
+		e.game = self
+		add_child(e)
+		e.global_position = b.global_position + Vector3(1.5, 0.2, 0)
+		enemies.append(e)
+		await get_tree().create_timer(0.3).timeout
+		b.take_damage(30.0)
+		b.take_damage(30.0)
+		await get_tree().create_timer(1.0).timeout
+		log.append("barrels %d -> %d soldier_dead=%s kills=%d" % [n0, get_tree().get_nodes_in_group("xbarrel").size(), str(e.dead), kills])
+	print("STAIRTEST ", " | ".join(log))
+	get_tree().quit()
+
+
 func _climbtest() -> void:
 	await get_tree().process_frame
 	start_game()
