@@ -89,6 +89,19 @@ var throw_done := false
 var nade_node: Node3D
 const MELEE_DUR := 0.5
 const THROW_DUR := 0.7
+# climbing (mantle onto ledges) and vaulting through windows
+var climb_t := -1.0          # >= 0 while a climb/vault is playing
+var climb_dur := 0.6
+var climb_from := Vector3.ZERO
+var climb_mid := Vector3.ZERO
+var climb_to := Vector3.ZERO
+var climb_vault := false
+var climb_k := 0.0           # 0..1, lowers the weapon during the move
+var space_was := false
+# co-op zombies: watching a living teammate while dead
+var spec_id := -1
+var spec_pos := Vector3.ZERO
+var spec_snap := true
 var guns := []
 var casings: Array = []
 var inspect_on := false
@@ -183,7 +196,12 @@ func _store_homes(g: Dictionary) -> void:
 
 # ---------------------------------------------------------------- input
 func _unhandled_input(event: InputEvent) -> void:
-	if game.state != "playing" or not alive:
+	if game.state != "playing":
+		return
+	if not alive:
+		# co-op zombies: left click switches which teammate the camera follows
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			spectate_next()
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var s: float = 0.0022 * game.settings.sens * (maxf(0.25, camera.fov / 75.0) if aim_k > 0.5 else 1.0)
@@ -234,8 +252,19 @@ func _physics_process(delta: float) -> void:
 		velocity.z = 0.0
 		velocity.y -= GRAV * delta
 		move_and_slide()
+		_spectate(delta)
 		return
 	var in_ctrl: bool = game.state == "playing"
+	# Space: climb/vault when facing a ledge or window (also while jumping at one), else jump
+	var space_now := Input.is_physical_key_pressed(KEY_SPACE) and in_ctrl
+	var space_hit := space_now and not space_was
+	space_was = space_now
+	if climb_t < 0.0 and (space_hit or (space_now and not is_on_floor() and velocity.y < 3.0)):
+		_try_climb()
+	if climb_t >= 0.0:
+		_climb_update(delta)
+		return
+	climb_k = maxf(0.0, climb_k - delta * 4.0)
 	var crouching := Input.is_physical_key_pressed(KEY_C) and in_ctrl
 	crouch = lerpf(crouch, 1.0 if crouching else 0.0, 1.0 - exp(-12.0 * delta))
 	var ix := float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A))
@@ -256,7 +285,7 @@ func _physics_process(delta: float) -> void:
 	velocity.x = lerpf(velocity.x, wish.x, k)
 	velocity.z = lerpf(velocity.z, wish.z, k)
 	if is_on_floor():
-		if Input.is_physical_key_pressed(KEY_SPACE):
+		if space_now:
 			velocity.y = 7.0
 	else:
 		velocity.y -= GRAV * delta
@@ -331,6 +360,253 @@ func _physics_process(delta: float) -> void:
 	_update_weapon(delta, hs)
 
 
+# ---------------------------------------------------------------- death / respawn
+## Cancel everything that was in progress (trigger held, aiming, reload, knife, grenade, climb...).
+## Called on death and on respawn: input released while dead never reaches the player, so without
+## this you came back still firing / aiming / mid-reload.
+func reset_actions() -> void:
+	mouse_down = false
+	aiming = false
+	sprinting = false
+	reloading = false
+	reload_t = 0.0
+	reload_given = false
+	shells_to_load = 0
+	shells_done = 0
+	melee_t = 0.0
+	melee_done = true
+	throw_t = 0.0
+	throw_done = true
+	switch_t = 0.0
+	next_w = cur
+	swapped = true
+	bolt_t = 0.0
+	pump_t = 0.0
+	fire_cd = 0.0
+	flash_t = 0.0
+	kick = 0.0
+	recoil_p = 0.0
+	recoil_y = 0.0
+	view_kick = 0.0
+	view_kick_v = 0.0
+	land_off = 0.0
+	land_v = 0.0
+	aim_k = 0.0
+	sprint_k = 0.0
+	shake = 0.0
+	lean = 0.0
+	crouch = 0.0
+	scoped = false
+	inspect_on = false
+	climb_t = -1.0
+	climb_k = 0.0
+	space_was = Input.is_physical_key_pressed(KEY_SPACE)
+	velocity = Vector3.ZERO
+	cap.height = 1.8
+	shape.position.y = 0.9
+	if knife_node:
+		knife_node.visible = false
+	if nade_node:
+		nade_node.visible = false
+	# put the moving parts of every gun back in place (a reload may have been cut in half)
+	for i in guns.size():
+		var g: Dictionary = guns[i]
+		g.model.visible = i == cur
+		g.left.position = g.left_home
+		if g.has("mag"):
+			g.mag.position = g.mag_home
+			g.mag.rotation = g.mag_rot
+			g.mag.visible = true
+		if g.has("handle"):
+			g.handle.position = g.handle_home
+			g.handle.rotation.z = 0.0
+		if g.has("slide"):
+			g.slide.position = g.slide_home
+		if g.has("pump"):
+			g.pump.position = g.pump_home
+	_end_spectate()
+
+
+# ---------------------------------------------------------------- spectating (co-op zombies)
+func _spectate_ids() -> Array:
+	var ids := []
+	if game.net.is_coop():
+		for id in game.net.puppets:
+			var pp = game.net.puppets[id]
+			if is_instance_valid(pp) and not pp.dead:
+				ids.append(id)
+	ids.sort()
+	return ids
+
+
+func spectate_next() -> void:
+	var ids := _spectate_ids()
+	if ids.is_empty():
+		return
+	var k := ids.find(spec_id)
+	spec_id = ids[(k + 1) % ids.size()]
+	spec_snap = true
+	game.sfx.play("click", -8)
+
+
+## HUD line while watching a teammate ("" when not spectating).
+func spectate_label() -> String:
+	if alive or spec_id < 0 or not game.net.puppets.has(spec_id):
+		return ""
+	var n: String = game.net.players.get(spec_id, {}).get("name", "?")
+	var many := _spectate_ids().size() > 1
+	return "Observando a %s%s" % [n, "  ·  Clic izquierdo: cambiar de jugador" if many else ""]
+
+
+## While dead in co-op: over-the-shoulder camera on a living teammate, following where they look.
+func _spectate(delta: float) -> void:
+	var ids := _spectate_ids()
+	if ids.is_empty():
+		_end_spectate()
+		return
+	if not spec_id in ids:
+		spec_id = ids[0]
+		spec_snap = true
+	var pp = game.net.puppets[spec_id]
+	var fy: float = pp.net_yaw
+	var fp: float = clampf(pp.net_pitch, -1.1, 1.1)
+	var look := Vector3(-sin(fy) * cos(fp), sin(fp), -cos(fy) * cos(fp))
+	var side := Vector3(cos(fy), 0, -sin(fy))
+	var headp: Vector3 = pp.global_position + Vector3(0, 1.6, 0)
+	var want := headp - look * 2.3 + side * 0.55 + Vector3(0, 0.3, 0)
+	# don't put the camera inside a wall
+	var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(headp, want, 1))
+	if not hit.is_empty():
+		want = hit.position + (headp - want).normalized() * 0.25
+	spec_pos = want if spec_snap else spec_pos.lerp(want, 1.0 - exp(-12.0 * delta))
+	spec_snap = false
+	camera.top_level = true
+	holder.visible = false
+	camera.fov = lerpf(camera.fov, 75.0, 1.0 - exp(-8.0 * delta))
+	camera.global_position = spec_pos
+	camera.look_at(headp + look * 12.0, Vector3.UP)
+
+
+func _end_spectate() -> void:
+	if camera == null or not camera.top_level:
+		return
+	camera.top_level = false
+	camera.position = Vector3.ZERO
+	camera.rotation = Vector3.ZERO
+	holder.visible = true
+	spec_id = -1
+
+
+# ---------------------------------------------------------------- climbing / vaulting
+## Space facing an obstacle: climb onto it (top 0.45 - 2.25 m above the feet, with room to stand)
+## or, if it is a window (sill with a clear opening above it), vault through to the other side.
+func _try_climb() -> bool:
+	if reloading and guns[cur].kind == "shell":
+		reloading = false
+	var space := get_world_3d().direct_space_state
+	var rid := [get_rid()]
+	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	var feet := global_position
+	var hit := {}
+	for hgt in [0.55, 1.0, 1.45]:
+		var o := feet + Vector3(0, hgt, 0)
+		var r := space.intersect_ray(PhysicsRayQueryParameters3D.create(o, o + fwd * 0.95, 1, rid))
+		if not r.is_empty() and absf(r.normal.y) < 0.5:
+			hit = r
+			break
+	if hit.is_empty():
+		return false
+	var into := -Vector3(hit.normal.x, 0, hit.normal.z).normalized()
+	if into.dot(fwd) < 0.45:
+		return false
+	var edge := Vector3(hit.position.x, feet.y, hit.position.z)
+	var probe := edge + into * 0.3
+	var down := space.intersect_ray(PhysicsRayQueryParameters3D.create(probe + Vector3(0, 2.45, 0), probe + Vector3(0, 0.3, 0), 1, rid))
+	if down.is_empty() or down.normal.y < 0.7:
+		return false
+	var top: float = down.position.y
+	var rise := top - feet.y
+	# zombies: never above 2.3 m, so the zone walls (3.6 m) can't be skipped from crates
+	var max_y := 2.3 if game.mode == "zombies" else 99.0
+	# 1) climb onto the top
+	if rise > 0.45 and rise < 2.25 and top <= max_y:
+		var land := Vector3(probe.x, top + 0.03, probe.z) + into * 0.25
+		if _fits(land):
+			_start_climb(Vector3(feet.x, top + 0.12, feet.z), land, 0.32 + rise * 0.2, false)
+			return true
+	# 2) window: clear opening above the sill -> vault through and land on the other side
+	if rise > 0.3 and rise < 1.6:
+		var o2 := Vector3(edge.x, top + 0.5, edge.z) - into * 0.3
+		if space.intersect_ray(PhysicsRayQueryParameters3D.create(o2, o2 + into * 1.9, 1, rid)).is_empty():
+			var far := edge + into * 1.35
+			var fl := space.intersect_ray(PhysicsRayQueryParameters3D.create(Vector3(far.x, top + 0.4, far.z), Vector3(far.x, feet.y - 2.5, far.z), 1, rid))
+			if not fl.is_empty() and fl.normal.y > 0.7:
+				var land2 := Vector3(far.x, fl.position.y + 0.03, far.z)
+				if land2.y <= max_y and _fits(land2):
+					_start_climb(Vector3(edge.x, top + 0.12, edge.z) - into * 0.15, land2, 0.62, true)
+					return true
+	return false
+
+
+func _fits(pos: Vector3) -> bool:
+	var q := PhysicsShapeQueryParameters3D.new()
+	var c := CapsuleShape3D.new()
+	c.radius = 0.32
+	c.height = 1.75
+	q.shape = c
+	q.transform = Transform3D(Basis(), pos + Vector3(0, 0.95, 0))
+	q.collision_mask = 1
+	q.exclude = [get_rid()]
+	return get_world_3d().direct_space_state.intersect_shape(q, 1).is_empty()
+
+
+func _start_climb(mid: Vector3, to: Vector3, dur: float, vault: bool) -> void:
+	climb_from = global_position
+	climb_mid = mid
+	climb_to = to
+	climb_dur = dur
+	climb_vault = vault
+	climb_t = 0.0
+	aiming = false
+	sprinting = false
+	velocity = Vector3.ZERO
+	game.sfx.play("swish", -6)
+	game.sfx.play("step%d" % (randi() % 6 + 1), -9, 0.05)
+
+
+func _climb_update(delta: float) -> void:
+	climb_t += delta
+	var k := clampf(climb_t / climb_dur, 0.0, 1.0)
+	climb_k = minf(1.0, climb_k + delta * 8.0)
+	var pos: Vector3
+	if climb_vault:
+		# up to the sill, then through the opening and down on the far side
+		var a := smoothstep(0.0, 0.35, k)
+		var b := smoothstep(0.3, 1.0, k)
+		pos = climb_from.lerp(climb_mid, a).lerp(climb_to, b)
+		pos.y += sin(b * PI) * 0.15
+	else:
+		# pull up first, then roll forward onto the ledge
+		var a := smoothstep(0.0, 0.6, k)
+		var b := smoothstep(0.45, 1.0, k)
+		pos = climb_from.lerp(climb_mid, a)
+		pos = Vector3(lerpf(pos.x, climb_to.x, b), lerpf(pos.y, climb_to.y, b), lerpf(pos.z, climb_to.z, b))
+	global_position = pos
+	velocity = Vector3.ZERO
+	# camera: through a window the eye ducks so it passes under the lintel; climbing tilts the view down a bit
+	var duck := sin(k * PI) * (1.05 if climb_vault else 0.35)
+	head.position = Vector3(0, eye_height() - duck, 0)
+	camera.rotation = Vector3(pitch - sin(k * PI) * 0.12, 0, sin(k * PI) * 0.06 * (1.0 if climb_vault else -1.0))
+	_update_weapon(delta, 0.0)
+	if k >= 1.0:
+		climb_t = -1.0
+		global_position = climb_to
+		velocity = (climb_to - climb_from) * Vector3(1, 0, 1)
+		velocity = velocity.normalized() * 2.0 if velocity.length() > 0.01 else Vector3.ZERO
+		land_v -= 0.35
+		game.sfx.play("land", -8, 0.05)
+
+
 # ---------------------------------------------------------------- weapons
 func current_spread() -> float:
 	var w: Dictionary = weapons[cur]
@@ -342,7 +618,7 @@ func fire() -> void:
 	var w: Dictionary = weapons[cur]
 	if reloading and guns[cur].kind == "shell" and w.ammo > 0:
 		reloading = false
-	if fire_cd > 0.0 or reloading or switch_t > 0.0 or sprint_k > 0.5 or not alive or melee_t > 0.0 or bolt_t > 0.0 or throw_t > 0.0:
+	if fire_cd > 0.0 or reloading or switch_t > 0.0 or sprint_k > 0.5 or not alive or melee_t > 0.0 or bolt_t > 0.0 or throw_t > 0.0 or climb_t >= 0.0:
 		return
 	if w.ammo <= 0:
 		game.sfx.play("empty")
@@ -899,6 +1175,10 @@ func _update_weapon(delta: float, hs: float) -> void:
 	g.left.position = hand
 	holder.position = pos
 	holder.rotation = Vector3(rx, ry, rz)
+	if climb_k > 0.001:
+		# weapon swings down and aside while climbing / vaulting
+		holder.position += Vector3(0.06, -0.3, 0.08) * climb_k
+		holder.rotation += Vector3(-0.55, 0.35, 0.45) * climb_k
 	scoped = w.get("scope", false) and aim_k > 0.86 and alive
 	g.model.visible = not scoped and swapped
 	if inspect_on:
@@ -926,6 +1206,7 @@ func take_damage(amount: float, from: Vector3) -> void:
 	if health <= 0.0:
 		health = 0.0
 		alive = false
+		reset_actions()
 		if game.net.active:
 			game.net.local_died()
 		else:

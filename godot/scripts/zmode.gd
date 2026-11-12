@@ -276,7 +276,10 @@ func _update_interact() -> void:
 	prompt = ""
 	target = {}
 	var pl = game.player
-	if pl == null or not pl.alive:
+	if pl == null:
+		return
+	if not pl.alive:
+		prompt = pl.spectate_label()
 		return
 	var pp: Vector3 = pl.global_position
 	var best := 2.4

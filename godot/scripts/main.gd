@@ -127,6 +127,8 @@ func _ready() -> void:
 		_shot(arg_value("--shot"), arg_value("--out"))
 	elif arg_value("--mptest") != "":
 		_mptest(arg_value("--mptest"))
+	elif has_arg("--climbtest"):
+		_climbtest()
 
 
 func has_arg(a: String) -> bool:
@@ -496,6 +498,7 @@ func mp_respawn(_revive := false) -> void:
 			if is_instance_valid(mate) and not mate.dead:
 				at = mate.global_position + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
 				break
+		player.reset_actions()
 		player.global_position = at + Vector3(0, 0.3, 0)
 		player.velocity = Vector3.ZERO
 		player.alive = true
@@ -521,6 +524,7 @@ func mp_respawn(_revive := false) -> void:
 		if dmin > best_d:
 			best_d = dmin
 			best = c
+	player.reset_actions()
 	player.global_position = best + Vector3(0, 0.3, 0)
 	player.velocity = Vector3.ZERO
 	player.alive = true
@@ -1114,6 +1118,16 @@ func _mptest(role: String) -> void:
 				first.take_damage(1.0e6, true)
 			await get_tree().create_timer(1.5).timeout
 			log.append("points %d -> %d kills=%d" % [p0, zm.points, kills])
+			# die and watch the host
+			player.god = false
+			player.mouse_down = true
+			player.take_damage(1000.0, player.global_position)
+			await get_tree().create_timer(1.0).timeout
+			var host_pp = net.puppets.get(1)
+			var d := -1.0
+			if host_pp != null and is_instance_valid(host_pp):
+				d = player.camera.global_position.distance_to(host_pp.global_position + Vector3(0, 1.6, 0))
+			log.append("espectador='%s' camara_libre=%s distancia_al_host=%.1f prompt='%s'" % [player.spectate_label(), str(player.camera.top_level), d, zm.prompt])
 		else:
 			net.send_hit(1, 60.0, false)
 			net.send_hit(1, 60.0, false)
@@ -1128,6 +1142,51 @@ func _mptest(role: String) -> void:
 	log.append("scores=" + " ".join(sc))
 	print("MPTEST ", role, " ", " | ".join(log))
 	net.leave()
+	get_tree().quit()
+
+
+## Climb / vault / death-reset checks on an open spot of map 0 (headless).
+func _climbtest() -> void:
+	await get_tree().process_frame
+	start_game()
+	intermission = 999.0
+	player.god = true
+	var log := []
+	var base := Vector3(40, 0, -30)
+	var mat := StandardMaterial3D.new()
+	# 1) a 1.2 m crate 1.5 m in front of the player (player looks along -Z with yaw 0)
+	WorldBuilder.blk(world, base.x, 0.0, base.z - 1.5, 1.6, 1.2, 1.6, mat)
+	player.global_position = base
+	player.yaw = 0.0
+	await get_tree().create_timer(0.4).timeout
+	var ok: bool = player._try_climb()
+	await get_tree().create_timer(1.2).timeout
+	log.append("caja: inicio=%s y=%.2f" % [str(ok), player.global_position.y])
+	# 2) a wall with a window (sill 1.1 m, opening to 2.2 m), walk up and vault through
+	var wz := base.z + 8.0
+	WorldBuilder.wall_gaps(world, base.x - 4.0, base.x + 4.0, wz, "x", 3.5, 0.3, [[base.x, "w"]], mat)
+	player.global_position = Vector3(base.x, 0.05, wz - 0.9)
+	player.yaw = PI   # facing +Z, towards the wall
+	await get_tree().create_timer(0.4).timeout
+	var ok2: bool = player._try_climb()
+	await get_tree().create_timer(1.2).timeout
+	log.append("ventana: inicio=%s z=%.2f (pared en %.2f) y=%.2f" % [str(ok2), player.global_position.z, wz, player.global_position.y])
+	# 3) a wall too high to climb (3.5 m): must refuse
+	player.global_position = Vector3(base.x + 3.0, 0.05, wz - 0.9)
+	await get_tree().create_timer(0.3).timeout
+	log.append("pared alta: trepa=%s" % str(player._try_climb()))
+	# 4) death while firing / aiming / reloading -> respawn must come back clean
+	player.mouse_down = true
+	player.aiming = true
+	player.start_reload()
+	player.god = false
+	mode = "mp"
+	net.active = true   # take the multiplayer death path without a network
+	player.take_damage(1000.0, player.global_position)
+	net.active = false
+	mp_respawn()
+	log.append("tras reaparecer: disparando=%s apuntando=%s recargando=%s vivo=%s" % [str(player.mouse_down), str(player.aiming), str(player.reloading), str(player.alive)])
+	print("CLIMBTEST ", " | ".join(log))
 	get_tree().quit()
 
 

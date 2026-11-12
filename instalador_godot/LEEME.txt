@@ -1,8 +1,17 @@
-﻿The Arnul War - versión 1.2
-==========================
+﻿The Arnul War - versión 1.2.1
+============================
 
 Shooter en primera persona hecho con el motor Godot 4.7. Es un programa normal de
 Windows: no necesita navegador ni conexión a internet (salvo para jugar online).
+
+
+NOVEDADES DE LA VERSIÓN 1.2.1
+-----------------------------
+  - Trepar: pulsa Espacio delante de una caja, un muro bajo o un tejado (hasta
+    unos 2 metros) para subirte, o delante de una ventana para saltar a través.
+  - Zombis cooperativo: si caes, ves la partida desde la cámara de un compañero
+    vivo (clic izquierdo para cambiar de compañero) hasta la siguiente ronda.
+  - Corregido: al morir ya no reapareces disparando, apuntando o recargando.
 
 
 NOVEDADES DE LA VERSIÓN 1.2
@@ -50,7 +59,9 @@ Menú principal > MULTIJUGADOR.
                         a la víctima.
   Zombis cooperativo  - todos juntos contra las rondas en los mapas de zombis.
                         Las puertas abiertas y los potenciadores son para todos. Si
-                        caes, vuelves al empezar la siguiente ronda.
+                        caes, vuelves al empezar la siguiente ronda; mientras
+                        tanto ves la partida desde la cámara de un compañero
+                        vivo (clic izquierdo para cambiar de compañero).
 
   - La primera vez Windows preguntará si permite la conexión: pulsa "Permitir acceso".
   - Por internet: el anfitrión debe abrir el puerto 7777 UDP en su router, o todos usar
@@ -61,7 +72,7 @@ Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
 
 INSTALAR
 --------
-Ejecuta "The Arnuls 1.2 Instalador.exe" y sigue el asistente:
+Ejecuta "The Arnuls 1.2.1 Instalador.exe" y sigue el asistente:
   1. Elige la carpeta (la que propone ya está bien).
   2. Marca si quieres acceso directo en el escritorio.
   3. Pulsa "Instalar" y, al terminar, "Finalizar" para empezar a jugar.
@@ -71,7 +82,7 @@ se sustituye sola y se conserva tu progreso (récords, medallas y ajustes).
 Windows SmartScreen puede avisar porque el programa no está firmado:
 pulsa "Más información" y después "Ejecutar de todas formas".
 
-Sin instalar: descomprime "TheArnulWar_v1.2_Portable.zip" y haz doble clic en
+Sin instalar: descomprime "TheArnulWar_v1.2.1_Portable.zip" y haz doble clic en
 "TheArnulWar.exe".
 
 
@@ -91,7 +102,7 @@ La primera vez se elige Baja automáticamente si se detecta una Intel integrada.
 CONTROLES
 ---------
 WASD moverse · Ratón mirar · Clic izquierdo disparar · Clic derecho apuntar
-Shift correr · Espacio saltar · C agacharse · Q / E inclinarse · R recargar
+Shift correr · Espacio saltar / trepar · C agacharse · Q / E inclinarse · R recargar
 1-6 o rueda cambiar de arma · V cuchillo · G granada · B usar racha
 F interactuar (zombis) · Tab marcador (multijugador) · Esc pausa
 Alt+Intro o F11 pantalla completa
