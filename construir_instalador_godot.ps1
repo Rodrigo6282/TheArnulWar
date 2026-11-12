@@ -1,5 +1,5 @@
 ﻿# Construye la version Godot de The Arnul War en .\dist_godot:
-#   TheArnulWar_v<version>_Instalador.exe  - instalador con asistente (Inno Setup)
+#   The Arnuls <version> Instalador.exe     - instalador con asistente (Inno Setup)
 #   TheArnulWar_v<version>_Portable.zip    - juego sin instalar (exe + LEEME)
 #   TheArnulWar.exe                        - el juego exportado por Godot
 # Uso: powershell -ExecutionPolicy Bypass -File construir_instalador_godot.ps1

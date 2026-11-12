@@ -38,7 +38,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 CloseApplications=yes
 OutputDir=..\dist_godot
-OutputBaseFilename=TheArnulWar_v{#AppVersion}_Instalador
+OutputBaseFilename=The Arnuls {#AppVersion} Instalador
 
 [Languages]
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"

@@ -61,7 +61,7 @@ Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
 
 INSTALAR
 --------
-Ejecuta "TheArnulWar_v1.2_Instalador.exe" y sigue el asistente:
+Ejecuta "The Arnuls 1.2 Instalador.exe" y sigue el asistente:
   1. Elige la carpeta (la que propone ya está bien).
   2. Marca si quieres acceso directo en el escritorio.
   3. Pulsa "Instalar" y, al terminar, "Finalizar" para empezar a jugar.
