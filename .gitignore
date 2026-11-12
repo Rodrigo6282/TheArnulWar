@@ -18,3 +18,7 @@ __pycache__/
 *.tmp
 Thumbs.db
 desktop.ini
+
+# Copias de seguridad locales
+backup_godot_*/
+repo_github/
