@@ -1,0 +1,56 @@
+﻿The Arnul War
+==============
+
+Shooter en primera persona con modo Operación (4 mapas contra soldados)
+y modo Zombis por rondas (3 mapas: Pueblo Olvidado, Fábrica Abandonada y Base Ártica).
+
+
+INSTALAR
+--------
+1. Ejecuta "TheArnulWar_Instalador.exe" y responde "Sí" a la pregunta.
+2. Al terminar se crea un acceso directo "The Arnul War" en el escritorio
+   y en el menú Inicio, y el juego se abre solo.
+
+No hace falta ser administrador: se instala para el usuario actual en
+%LOCALAPPDATA%\Programs\TheArnulWar
+
+Aviso de Windows SmartScreen: como el instalador no está firmado digitalmente,
+Windows puede mostrar "Windows protegió tu PC". Pulsa "Más información" y
+después "Ejecutar de todas formas".
+
+
+VERSIÓN PORTÁTIL (sin instalar)
+-------------------------------
+Descomprime "TheArnulWar_Portable.zip" en cualquier carpeta (o en un USB)
+y haz doble clic en "Jugar.vbs". Para jugar en un navegador cualquiera,
+abre "index.html".
+
+
+REQUISITOS
+----------
+- Windows 10 u 11.
+- Microsoft Edge (viene con Windows) o Google Chrome.
+- Una tarjeta gráfica con soporte WebGL 2 (casi todas desde 2014).
+  Si va lento, cambia "Calidad gráfica" a Media o Baja en el menú.
+
+
+DESINSTALAR
+-----------
+Configuración > Aplicaciones > Aplicaciones instaladas > The Arnul War > Desinstalar.
+También puedes ejecutar "desinstalar.bat" en la carpeta del juego.
+Al desinstalar se borran también la configuración, el récord y las medallas.
+
+
+CONTROLES
+---------
+WASD moverse · Ratón mirar · Clic izquierdo disparar · Clic derecho apuntar
+Shift correr (con la mira del francotirador: contener la respiración)
+Espacio saltar · C agacharse · Q / E inclinarse · R recargar · V cuchillo
+1-7 o rueda cambiar de arma · G granada · B bombardeo · F comprar/usar (zombis)
+Esc pausa
+
+
+CRÉDITOS
+--------
+Motor 3D: three.js (licencia MIT, Copyright 2010-2021 Three.js Authors).
+Texturas: Poly Haven (polyhaven.com), dominio público CC0.

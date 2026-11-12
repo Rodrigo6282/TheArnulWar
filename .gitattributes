@@ -1,0 +1,2 @@
+# Guardar los archivos tal cual (los .bat/.vbs necesitan CRLF y los .ps1 su BOM)
+* -text

@@ -1,0 +1,77 @@
+﻿The Arnul War (versión Godot)
+=============================
+
+Versión del juego hecha con el motor Godot 4.7. Es un programa normal de Windows:
+no necesita navegador ni conexión a internet.
+
+Modos de juego:
+  Operación - oleadas de soldados en Ciudad Rota, Aldea del Desierto y Puerto Helado.
+  Zombis    - rondas en Pueblo Olvidado, Fábrica Abandonada, Base Ártica y Cementerio:
+              gana puntos, retira
+              escombros para abrir zonas, compra armas en las paredes, bebe ventajas
+              (Blindaje, Manos rápidas, Pulso), mejora tu arma en la Forja (5000)
+              y prueba suerte con la caja misteriosa.
+
+Armas: fusil, escopeta, pistola, subfusil, francotirador (con mira), ametralladora,
+cuchillo y granadas. Medallas por bajas y rachas: a las 3 bajas un UAV (dron que
+marca a los enemigos), a las 5 un Bombardero y a las 7 un Helicóptero furtivo que
+dispara solo (B para usarlas; la racha se pierde si bajas de media vida).
+
+
+MULTIJUGADOR (duelo a muerte, todos contra todos)
+------------------------------------------------
+Menú principal > MULTIJUGADOR.
+  - Uno pulsa "CREAR PARTIDA" (elige el mapa).
+  - A los demás de la misma red (wifi o cable) les aparece sola en la lista
+    "PARTIDAS EN TU RED": solo tienen que pulsar "UNIRSE". Ya no hace falta
+    escribir la IP (sigue existiendo la opción "Unirse por IP" por si acaso).
+  - Gana el primero en llegar a 20 bajas.
+  - Tab muestra el marcador.
+  - En la misma red (wifi o cable) funciona directamente. La primera vez Windows
+    preguntará si permite la conexión: pulsa "Permitir acceso".
+  - Por internet: el host debe abrir el puerto 7777 UDP en su router, o todos usar
+    una VPN de juegos gratuita (Radmin VPN, ZeroTier) y usar la IP que da la VPN.
+Menú principal > OPERADOR: cambia tu nombre y elige entre 6 operadores
+(Halcón, Espectro, Duna, Ártico, Cobra, Jaguar). Los demás jugadores te ven así.
+
+
+INSTALAR
+--------
+Ejecuta "TheArnulWar_Godot_Instalador.exe" y responde "Sí".
+Se crea el acceso directo "The Arnul War (Godot)" en el escritorio y el menú Inicio.
+También puedes jugar sin instalar: haz doble clic en "TheArnulWar.exe".
+
+Windows SmartScreen puede avisar porque el programa no está firmado:
+pulsa "Más información" y después "Ejecutar de todas formas".
+
+
+REQUISITOS
+----------
+Windows 10 u 11 de 64 bits y una tarjeta gráfica compatible con Vulkan
+(prácticamente todas desde 2016, incluidas las Intel UHD integradas).
+
+Calidad gráfica (menú principal):
+  Baja  - recomendada para gráficas integradas (Intel UHD).
+  Media - oclusión ambiental y mejores sombras.
+  Alta  - iluminación global, reflejos y niebla volumétrica (pensada para gráfica dedicada;
+          en gráficas integradas va lenta).
+La primera vez se elige Baja automáticamente si se detecta una Intel integrada.
+
+
+CONTROLES
+---------
+WASD moverse · Ratón mirar · Clic izquierdo disparar · Clic derecho apuntar
+Shift correr · Espacio saltar · C agacharse · Q / E inclinarse · R recargar
+1-6 o rueda cambiar de arma · V cuchillo · G granada · B usar racha
+F interactuar (zombis) · Esc pausa · Alt+Intro o F11 pantalla completa
+
+
+DESINSTALAR
+-----------
+Configuración > Aplicaciones > Aplicaciones instaladas > The Arnul War (Godot).
+
+
+CRÉDITOS
+--------
+Motor: Godot Engine (licencia MIT, godotengine.org).
+Texturas: Poly Haven (polyhaven.com), dominio público CC0.

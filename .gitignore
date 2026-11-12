@@ -1,0 +1,19 @@
+# Compilados (exe e instaladores: superan el límite de 100 MB de GitHub; se regeneran con los scripts)
+dist/
+dist_godot/
+
+# Binarios del motor Godot (se descargan aparte)
+herramientas/
+
+# Caché del editor de Godot
+godot/.godot/
+*.import.tmp
+
+# Otro proyecto que no forma parte del juego
+video_ninos/
+
+# Varios
+__pycache__/
+*.tmp
+Thumbs.db
+desktop.ini
