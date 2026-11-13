@@ -1072,6 +1072,12 @@ static func knife() -> Node3D:
 static func grenade_hand() -> Node3D:
 	var k := Node3D.new()
 	if scan_on(STICK_GLTF):
+		if no_hands:
+			# held by the operator's own Mixamo arm (fp_arms IK on the `rgrip` meta): the handle
+			# stands like a pistol grip, centred on the node, with the head above the fist
+			_mount_scan(STICK_GLTF, Transform3D(Basis(), Vector3(0, 0.04, 0)), {"stick_grenade": k})
+			right_grip(k, Vector3(0, 0, 0.0), Vector3.UP, 0.017, [], Vector3(0.18, -0.42, 1.0))
+			return k
 		# scanned stick grenade (Poly Haven "stick_grenade", CC0): fist around the wooden handle,
 		# head pointing forward (model +Y → -Z)
 		_mount_scan(STICK_GLTF, Transform3D(Basis(Vector3.RIGHT, -PI / 2), Vector3(0, 0, -0.07)), {"stick_grenade": k})
@@ -1080,8 +1086,9 @@ static func grenade_hand() -> Node3D:
 	var body := SphereMesh.new()
 	body.radius = 0.032
 	body.height = 0.07
-	_mi(k, body, wm(Color(0.22, 0.27, 0.17), 0.7), Vector3(0, 0.0, -0.03))
-	cyl(k, 0.012, 0.02, m_dark(), Vector3(0, 0.03, -0.03)).rotation = Vector3.ZERO
+	_mi(k, body, wm(Color(0.22, 0.27, 0.17), 0.7), Vector3(0, 0.0, -0.03)).set_meta("nade", true)
+	cyl(k, 0.012, 0.02, m_dark(), Vector3(0, 0.03, -0.03)).set_meta("nade", true)
+	k.get_child(1).rotation = Vector3.ZERO
 	part(k, Vector3(0.012, 0.05, 0.006), m_steel(), Vector3(0.016, 0.01, -0.05), Vector3(0, 0, -0.2), 0.002)
 	ring(k, 0.009, 0.0015, m_steel(), Vector3(-0.014, 0.045, -0.03))
 	left_guard(k, Vector3(0, 0, -0.03), 0.026, Vector3(0.25, -0.55, 1.0), Vector3(0, 0, 1))

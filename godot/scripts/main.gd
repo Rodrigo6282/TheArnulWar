@@ -1655,6 +1655,11 @@ func _shot(kind: String, out: String) -> void:
 		if kind == "knife":
 			player.melee()
 			await get_tree().create_timer(0.17).timeout
+		if kind == "throw":
+			# mid-throw frame (the arm holding the grenade); --wait = seconds after the throw starts
+			player.god = true
+			player.throw_grenade()
+			await get_tree().create_timer(float(arg_value("--wait")) if arg_value("--wait") != "" else 0.2).timeout
 		if kind == "grenade":
 			player.god = true
 			player.pitch = 0.12

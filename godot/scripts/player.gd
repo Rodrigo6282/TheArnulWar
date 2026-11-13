@@ -90,6 +90,7 @@ var grenades := 3
 var throw_t := 0.0
 var throw_done := false
 var nade_node: Node3D
+var nade_left: Node3D          # where the left Mixamo arm rests (out of frame) during a throw
 const MELEE_DUR := 0.5
 const THROW_DUR := 0.7
 # climbing (mantle onto ledges) and vaulting through windows
@@ -173,9 +174,17 @@ func _ready() -> void:
 	knife_node = WM.knife()
 	knife_node.visible = false
 	holder.get_parent().add_child(knife_node)
+	# with the Mixamo arms the grenade is held by the operator's own right hand (IK); the left arm
+	# drops out of frame meanwhile (the gun dips away during the throw)
+	WM.no_hands = fp_arms != null
 	nade_node = WM.grenade_hand()
+	WM.no_hands = false
 	nade_node.visible = false
 	holder.get_parent().add_child(nade_node)
+	nade_left = Node3D.new()
+	nade_left.position = Vector3(-0.32, -0.85, -0.05)
+	nade_left.set_meta("lgrip", {"c": Vector3.ZERO, "axis": Vector3(0, 0, -1), "rad": 0.03})
+	holder.get_parent().add_child(nade_left)
 	muzzle_light = OmniLight3D.new()
 	muzzle_light.light_color = Color(1.0, 0.72, 0.4)
 	muzzle_light.omni_range = 7.0
@@ -1072,8 +1081,10 @@ func _update_weapon(delta: float, hs: float) -> void:
 		nade_node.position = np
 		nade_node.rotation = nr
 		nade_node.visible = true
-		nade_node.get_child(0).visible = tp < 0.5
-		nade_node.get_child(1).visible = tp < 0.5
+		# the grenade itself leaves the hand at the release
+		for c in nade_node.get_children():
+			if c.has_meta("scan") or c.has_meta("nade"):
+				c.visible = tp < 0.5
 		if not throw_done and tp >= 0.5:
 			throw_done = true
 			_spawn_grenade()
@@ -1198,7 +1209,9 @@ func _update_weapon(delta: float, hs: float) -> void:
 		holder.position += Vector3(0.06, -0.3, 0.08) * climb_k
 		holder.rotation += Vector3(-0.55, 0.35, 0.45) * climb_k
 	scoped = w.get("scope", false) and aim_k > 0.86 and alive
-	g.model.visible = not scoped and swapped
+	# with the Mixamo arms the right hand is on the grenade: hide the (dipped) gun meanwhile
+	var throwing: bool = fp_arms != null and throw_t > 0.0 and dip > 0.15
+	g.model.visible = not scoped and swapped and not throwing
 	if inspect_on:
 		holder.position = Vector3(0, 0, -0.85)
 		holder.rotation = inspect_rot
@@ -1209,7 +1222,10 @@ func _update_weapon(delta: float, hs: float) -> void:
 		g.flash.scale = Vector3.ONE * randf_range(0.8, 1.2)
 	muzzle_light.light_energy = 3.0 if flash_t > 0.0 else 0.0
 	if fp_arms:
-		fp_arms.update(g, g.model.visible and not inspect_on and alive)
+		if throw_t > 0.0 and nade_node.has_meta("rgrip"):
+			fp_arms.update({"model": nade_node, "left": nade_left}, alive and not inspect_on)
+		else:
+			fp_arms.update(g, g.model.visible and not inspect_on and alive)
 
 
 # ---------------------------------------------------------------- damage
