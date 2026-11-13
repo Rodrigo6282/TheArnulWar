@@ -9,8 +9,12 @@ uniform sampler2D normal_tex : hint_normal, filter_linear_mipmap_anisotropic;
 uniform bool has_normal = false;
 uniform vec3 tint = vec3(1.0);
 uniform float roughness : hint_range(0.0, 1.0) = 0.78;
+// thicker arms: skin pushed out along the normal, scaled per vertex by UV2.x (fp_arms.gd: 1 on
+// upper arm / forearm, less on the palm, ~0 on the fingers). In mesh units (VERTEX is already skinned).
+uniform float bulk = 0.0;
 
 void vertex() {
+	VERTEX += NORMAL * bulk * UV2.x;
 	POSITION = PROJECTION_MATRIX * MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
 	POSITION.z = mix(POSITION.z, POSITION.w, 0.97);
 }

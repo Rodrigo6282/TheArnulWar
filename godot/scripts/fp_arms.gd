@@ -9,6 +9,7 @@ const RIG := preload("res://scripts/rig.gd")
 const SKIN_SH := preload("res://shaders/fp_skin.gdshader")
 const KEEP := ["Shoulder", "Arm", "Hand"]     # bones whose triangles are kept (Arm also matches ForeArm)
 const ARM_SCALE := 1.3
+const BULK := 0.022           # how far the arm skin is pushed out (mesh units ≈ m, before ARM_SCALE)
 const SHOULDERS := Vector3(0.03, -0.47, -0.2)   # shoulder midpoint in camera space (below the frame)
 
 var node: Node3D
@@ -100,6 +101,22 @@ func _strip_body(tint: Color) -> void:
 			if kept.is_empty():
 				continue
 			arr[Mesh.ARRAY_INDEX] = kept
+			# per-vertex "bulk" in UV2.x (read by fp_skin.gdshader, which pushes the skin out
+			# along the normal): full on upper arm / forearm, a little on the palm, almost none
+			# on the fingers; blended by the bone weights so the wrist has no step
+			var bulk := PackedVector2Array()
+			bulk.resize(nv)
+			for v in nv:
+				var f := 0.0
+				var wsum := 0.0
+				for k in per:
+					var w: float = weights[v * per + k]
+					if w <= 0.0:
+						continue
+					f += w * _bulk_of(_bind_name(skin, bones[v * per + k]))
+					wsum += w
+				bulk[v] = Vector2(f / maxf(wsum, 0.0001), 0.0)
+			arr[Mesh.ARRAY_TEX_UV2] = bulk
 			var flags: int = src.surface_get_format(s) & Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS
 			out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr, [], {}, flags)
 			var sm = m3.get_active_material(s)
@@ -111,6 +128,7 @@ func _strip_body(tint: Color) -> void:
 					fm.set_shader_parameter("normal_tex", sm.normal_texture)
 					fm.set_shader_parameter("has_normal", true)
 			fm.set_shader_parameter("tint", Vector3(tint.r, tint.g, tint.b))
+			fm.set_shader_parameter("bulk", _bulk_amount())
 			out.surface_set_material(out.get_surface_count() - 1, fm)
 		if out.get_surface_count() == 0:
 			m3.queue_free()
@@ -118,6 +136,30 @@ func _strip_body(tint: Color) -> void:
 		m3.mesh = out
 		for s in out.get_surface_count():
 			m3.set_surface_override_material(s, null)
+
+
+func _bind_name(skin: Skin, b: int) -> String:
+	if skin == null or b < 0 or b >= skin.get_bind_count():
+		return ""
+	var nm := skin.get_bind_name(b)
+	if nm == "" and skin.get_bind_bone(b) >= 0:
+		nm = skel.get_bone_name(skin.get_bind_bone(b))
+	return nm
+
+
+## How much a bone's skin is thickened (1 = the full `bulk` of the shader).
+static func _bulk_of(bone: String) -> float:
+	if "Hand" in bone:
+		# fingers (HandThumb1, HandIndex2...) stay slim so they still wrap the grips
+		for f in ["Thumb", "Index", "Middle", "Ring", "Pinky"]:
+			if f in bone:
+				return 0.08
+		return 0.35
+	if "ForeArm" in bone:
+		return 1.0
+	if "Arm" in bone or "Shoulder" in bone:
+		return 1.0
+	return 0.0
 
 
 ## Hand frames from the T-pose rest (palm normal, finger direction) and from the aim pose (how
@@ -218,3 +260,11 @@ class IK extends SkeletonModifier3D:
 			return
 		var q := Quaternion(v1, v2)
 		sk.set_bone_global_pose(bone, Transform3D(Basis(q) * g.basis, g.origin))
+
+
+## BULK, or --bulk=X on the command line (to compare thicknesses in screenshots).
+static func _bulk_amount() -> float:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--bulk="):
+			return float(a.get_slice("=", 1))
+	return BULK
