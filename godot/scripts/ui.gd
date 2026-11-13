@@ -353,6 +353,10 @@ func _build_menu() -> void:
 	var ver := _label("Versión %s" % str(ProjectSettings.get_setting("application/config/version", "")), 14, Color(0.75, 0.78, 0.76), 3)
 	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(ver)
+	# attribution required by the CC-BY models (full credits in LEEME.txt)
+	var cred := _label("Modelos 3D: Poly Haven (CC0) · Fusil, subfusil y ametralladora: \"Ak trio pack\" de mightydinosaurcol (CC-BY 3.0, OpenGameArt) · Personajes: Mixamo", 12, Color(0.7, 0.73, 0.71), 3)
+	cred.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(cred)
 	if game.updater:
 		game.updater.found.connect(func():
 			ver.text = "Versión %s  ·  nueva versión %s: actualización obligatoria" % [game.updater.current, game.updater.latest]

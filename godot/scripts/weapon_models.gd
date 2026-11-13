@@ -452,6 +452,8 @@ static func rifle() -> Dictionary:
 	part(g, Vector3(0.016, 0.008, 0.035), black, Vector3(0, -0.06, 0.24), Vector3.ZERO, 0.002)
 	cyl(g, 0.0135, 0.003, black, Vector3(0, 0.01, -0.741))
 	# hands
+	if ak_on("rifle"):
+		return _ak_scan("rifle", g, mag)
 	right_grip(g, Vector3(0, -0.095, 0.075), Basis(Vector3.RIGHT, -0.3) * Vector3.UP, 0.025,
 		[Vector3(0.017, -0.058, 0.02), Vector3(0.016, -0.062, -0.002), Vector3(0.012, -0.068, -0.014)], Vector3(0.18, -0.42, 1.0))
 	var left := Node3D.new()
@@ -698,6 +700,133 @@ static func _sniper_scan(g: Node3D, handle: Node3D, mag: Node3D) -> Dictionary:
 		"left": left, "mag": mag, "handle": handle, "bolt": true, "kind": "mag"}
 
 
+# ---- "Ak trio pack" by mightydinosaurcol (OpenGameArt, CC-BY 3.0: credited in the main menu and
+# LEEME): AK-47 → rifle, AKS-74U → smg, RPK → lmg. One mesh per gun (FBX, barrel along +Z), so the
+# magazine is cut out of the mesh by triangle position (regions = [z min, z max, y max] in model
+# space) and rides on the `mag` node for the reloads. Lined up on the procedural gun's pistol grip
+# (where the right hand is); left hand, sights, flash and charging handle measured from side photos.
+const AK_DIR := "res://assets/models/ak_trio/"
+const AK_CFG := {
+	"rifle": {"file": "ak47.fbx", "t": Vector3(0, -0.114, -0.014), "gc": Vector3(0, -0.095, 0.075), "gr": 0.025,
+		"left": Vector3(0, -0.08, -0.21), "guard": Vector3(0, 0.016, 0), "guard_r": 0.024, "mag": Vector3(0, -0.048, -0.074),
+		"handle": Vector3(0.02, -0.021, -0.122), "regions": [[0.022, 0.115, 0.066], [0.115, 0.17, 0.0]],
+		"hip": Vector3(0.14, -0.14, -0.45), "aim": Vector3(0, -0.026, -0.33), "flash": Vector3(0, -0.011, -0.48), "fs": 0.32},
+	"smg": {"file": "aks.fbx", "t": Vector3(0, -0.099, -0.004), "gc": Vector3(0, -0.085, 0.06), "gr": 0.024,
+		"left": Vector3(0, -0.07, -0.19), "guard": Vector3(0, 0.02, 0), "guard_r": 0.024, "mag": Vector3(0, -0.033, -0.064),
+		"handle": Vector3(0.02, -0.006, -0.112), "regions": [[0.022, 0.115, 0.066], [0.115, 0.17, 0.0]],
+		"hip": Vector3(0.13, -0.14, -0.42), "aim": Vector3(0, -0.046, -0.25), "flash": Vector3(0, 0.006, -0.38), "fs": 0.28},
+	"lmg": {"file": "RPK.fbx", "t": Vector3(0, -0.119, -0.004), "gc": Vector3(0, -0.1, 0.085), "gr": 0.026,
+		"left": Vector3(0, -0.085, -0.2), "guard": Vector3(0, 0.016, 0), "guard_r": 0.024, "mag": Vector3(0, -0.053, -0.064),
+		"handle": Vector3(0.02, -0.026, -0.112), "regions": [[0.012, 0.115, 0.066]],
+		"hip": Vector3(0.14, -0.15, -0.48), "aim": Vector3(0, -0.021, -0.36), "flash": Vector3(0, -0.016, -0.59), "fs": 0.4},
+}
+static var _ak_mats := {}
+static var _split_cache := {}
+
+
+static func ak_on(which: String) -> bool:
+	return AK_CFG.has(which) and scan_on(AK_DIR + AK_CFG[which].file)
+
+
+static func _ak_mat(mat_name: String) -> ShaderMaterial:
+	if _ak_mats.has(mat_name):
+		return _ak_mats[mat_name]
+	var m := ShaderMaterial.new()
+	m.shader = SHT
+	m.set_shader_parameter("use_arm", 0.0)
+	if mat_name == "RPKMATS":
+		m.set_shader_parameter("tex_alb", load(AK_DIR + "tex/RPKtex.tga"))
+		m.set_shader_parameter("rough_mul", 0.7)
+	else:
+		m.set_shader_parameter("tex_alb", load(AK_DIR + "tex/akmatex.TGA"))
+		m.set_shader_parameter("tex_rough", load(AK_DIR + "tex/akrough.TGA"))
+		m.set_shader_parameter("tex_spec", load(AK_DIR + "tex/akspec.TGA"))
+	_ak_mats[mat_name] = m
+	return m
+
+
+## Split one surface into [body, magazine] meshes: a triangle goes to the magazine when its
+## centroid (model space, after xf) falls in one of the regions.
+static func _split_surface(mesh: Mesh, s: int, xf: Transform3D, regions: Array) -> Array:
+	var key := "%s|%d|%s" % [mesh.get_rid(), s, str(regions)]
+	if _split_cache.has(key):
+		return _split_cache[key]
+	var arr: Array = mesh.surface_get_arrays(s)
+	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array(range(verts.size()))
+	var body := PackedInt32Array()
+	var magi := PackedInt32Array()
+	for t in range(0, idx.size(), 3):
+		var c: Vector3 = xf * ((verts[idx[t]] + verts[idx[t + 1]] + verts[idx[t + 2]]) / 3.0)
+		var in_mag := false
+		for r in regions:
+			if c.z >= r[0] and c.z <= r[1] and c.y <= r[2]:
+				in_mag = true
+				break
+		var dst := magi if in_mag else body
+		dst.append(idx[t])
+		dst.append(idx[t + 1])
+		dst.append(idx[t + 2])
+	var out := []
+	for ids in [body, magi]:
+		if (ids as PackedInt32Array).is_empty():
+			out.append(null)
+			continue
+		var a2 := arr.duplicate()
+		a2[Mesh.ARRAY_INDEX] = ids
+		var am := ArrayMesh.new()
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+		out.append(am)
+	_split_cache[key] = out
+	return out
+
+
+## Rifle / smg / lmg on an AK-pack model. g = gun root (procedural parts get freed), mag = the
+## procedural magazine node (moved to the AK magazine). The charging handle becomes an empty
+## node at the AK's handle (the hand reaches there during reloads).
+static func _ak_scan(which: String, g: Node3D, mag: Node3D) -> Dictionary:
+	var cf: Dictionary = AK_CFG[which]
+	_clear_proc(g, [mag])
+	mag.position = cf.mag
+	mag.rotation = Vector3.ZERO
+	var handle := Node3D.new()
+	handle.position = cf.handle
+	g.add_child(handle)
+	var base := Transform3D(Basis(Vector3.UP, PI), cf.t)
+	var sc: Node = (load(AK_DIR + cf.file) as PackedScene).instantiate()
+	for src in sc.find_children("*", "MeshInstance3D", true, false):
+		var xf: Transform3D = (src as MeshInstance3D).transform
+		var p: Node = src.get_parent()
+		while p != null and p != sc and p is Node3D:
+			xf = (p as Node3D).transform * xf
+			p = p.get_parent()
+		var mesh: Mesh = (src as MeshInstance3D).mesh
+		for s in mesh.get_surface_count():
+			var sm: Material = mesh.surface_get_material(s)
+			var mat := _ak_mat(sm.resource_name if sm else "AK")
+			var parts := _split_surface(mesh, s, xf, cf.regions)
+			for k in 2:
+				if parts[k] == null:
+					continue
+				var dst: Node3D = g if k == 0 else mag
+				var mi := MeshInstance3D.new()
+				mi.mesh = parts[k]
+				mi.material_override = mat
+				mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				mi.transform = (base * xf) if k == 0 else dst.transform.affine_inverse() * base * xf
+				mi.set_meta("scan", true)
+				dst.add_child(mi)
+	sc.free()
+	var gc: Vector3 = cf.gc
+	right_grip(g, gc, Basis(Vector3.RIGHT, -0.3) * Vector3.UP, cf.gr, trig_pts(gc), Vector3(0.18, -0.42, 1.0))
+	var left := Node3D.new()
+	left.position = cf.left
+	g.add_child(left)
+	left_guard(left, cf.guard, cf.guard_r, Vector3(-0.32, -0.45, 1.0))
+	return {"model": g, "hip": cf.hip, "aim": cf.aim, "flash": flash(g, cf.flash, cf.fs),
+		"left": left, "mag": mag, "handle": handle, "kind": "mag"}
+
+
 ## Gun-root children that are procedural geometry (everything except the listed movable nodes).
 static func _clear_proc(g: Node3D, keep: Array) -> void:
 	for c in g.get_children():
@@ -769,6 +898,8 @@ static func smg() -> Dictionary:
 	pins(g, [Vector3(0.03, -0.02, -0.15), Vector3(-0.03, -0.02, -0.15), Vector3(0.03, -0.02, 0.04), Vector3(-0.03, -0.02, 0.04)], 0.004, steel)
 	part(g, Vector3(0.004, 0.022, 0.03), steel, Vector3(-0.031, -0.01, 0.085), Vector3.ZERO, 0.002)
 	flashlight(g, Vector3(0, -0.044, -0.27))
+	if ak_on("smg"):
+		return _ak_scan("smg", g, mag)
 	right_grip(g, Vector3(0, -0.085, 0.06), Basis(Vector3.RIGHT, -0.3) * Vector3.UP, 0.024, trig_pts(Vector3(0, -0.085, 0.06)), Vector3(0.18, -0.42, 1.0))
 	var left := Node3D.new()
 	left.position = Vector3(0, -0.03, -0.255)
@@ -908,6 +1039,8 @@ static func lmg() -> Dictionary:
 	pins(g, [Vector3(0.039, -0.02, -0.17), Vector3(-0.039, -0.02, -0.17), Vector3(0.039, -0.02, 0.08), Vector3(-0.039, -0.02, 0.08), Vector3(0.042, 0.02, -0.26), Vector3(-0.042, 0.02, -0.26)], 0.0045, steel)
 	cyl(g, 0.007, 0.03, steel, Vector3(0, 0.072, -0.53)).rotation = Vector3(0, 0, PI / 2)
 	flashlight(g, Vector3(-0.05, -0.005, -0.42))
+	if ak_on("lmg"):
+		return _ak_scan("lmg", g, mag)
 	right_grip(g, gc, Basis(Vector3.RIGHT, -0.3) * Vector3.UP, 0.026, trig_pts(gc), Vector3(0.18, -0.42, 1.0))
 	var left := Node3D.new()
 	left.position = Vector3(0, -0.035, -0.36)
@@ -993,11 +1126,16 @@ static func world_copy(i: int) -> Node3D:
 				ms.normal_enabled = true
 				ms.normal_texture = src.get_shader_parameter("tex_nor")
 				var arm: Texture2D = src.get_shader_parameter("tex_arm")
-				ms.roughness_texture = arm
-				ms.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
-				ms.metallic = 1.0
-				ms.metallic_texture = arm
-				ms.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_BLUE
+				if arm != null:
+					ms.roughness_texture = arm
+					ms.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
+					ms.metallic = 1.0
+					ms.metallic_texture = arm
+					ms.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_BLUE
+				else:
+					# AK-pack layout: separate roughness map, moderate metal
+					ms.roughness_texture = src.get_shader_parameter("tex_rough")
+					ms.metallic = 0.35
 				_world_mats[src] = ms
 			mi.material_override = _world_mats[src]
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

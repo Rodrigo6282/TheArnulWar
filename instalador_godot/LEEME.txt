@@ -159,4 +159,10 @@ CRÉDITOS
 --------
 Motor: Godot Engine (licencia MIT, godotengine.org).
 Texturas y modelos 3D de objetos: Poly Haven (polyhaven.com), dominio público CC0.
+Pistola, francotirador y granada: modelos "Service Pistol", "Bolt Action Rifle 7.62" y
+  "Stick Grenade" de Poly Haven (polyhaven.com), dominio público CC0.
+Fusil de asalto, subfusil y ametralladora: "Ak trio pack" de mightydinosaurcol
+  (opengameart.org/node/156989), licencia CC-BY 3.0
+  (creativecommons.org/licenses/by/3.0). Se usan los modelos AK-47, AKS-74U y RPK
+  con sus texturas; el cargador se separó del modelo para las recargas.
 Personajes y animaciones: Mixamo (mixamo.com), de Adobe.
