@@ -564,6 +564,19 @@ static func pistol() -> Dictionary:
 	part(g, Vector3(0.03, 0.012, 0.03), black, Vector3(0, -0.032, 0.048), Vector3(-0.4, 0, 0), 0.006)
 	for sx in [-1.0, 1.0]:
 		part(g, Vector3(0.003, 0.07, 0.036), wm(Color(0.09, 0.09, 0.09), 0.85, 0.0, 0.0, "rubber"), Vector3(0.019 * sx, -0.095, 0.012), Vector3(-0.2, 0, 0), 0.001)
+	# scanned model (Poly Haven "service_pistol", CC0) replaces the primitives; the slide / mag
+	# nodes, grip points and flash stay, so reloads, recoil and the IK hands work unchanged
+	var scan := scan_pistol_on()
+	if scan:
+		for c in g.get_children():
+			if c != slide and c != mag:
+				c.free()
+		for c in slide.get_children() + mag.get_children():
+			c.free()
+		_mount_scan(PISTOL_GLTF, Transform3D(Basis(Vector3.UP, PI / 2), Vector3(0, -0.08, 0.005)),
+			{"service_pistol_pistol_a": g, "service_pistol_hammer_a": g, "service_pistol_trigger_a": g,
+			"service_pistol_slide_a": slide, "service_pistol_magazine_loaded": mag},
+			{"service_pistol_magazine_loaded": Vector3(0.1, 0, 0)})
 	var ga := Basis(Vector3.RIGHT, -0.2) * Vector3.UP
 	var gc := Vector3(0, -0.09, 0.01)
 	right_grip(g, gc, ga, 0.022, [Vector3(0.015, -0.046, 0.0), Vector3(0.014, -0.049, -0.012), Vector3(0.011, -0.053, -0.022)], Vector3(0.15, -0.55, 1.0))
@@ -578,8 +591,66 @@ static func pistol() -> Dictionary:
 	var lpc := palm(left, lc + ga * -0.02, ga, Vector3.RIGHT, 0.038, 3.55, Vector3(0.028, 0.085, 0.07))
 	finger_path(left, [arc_pt(lc + ga * 0.03, ga, Vector3.RIGHT, 0.036, 3.35), Vector3(-0.026, -0.022, -0.035) - left.position, Vector3(-0.024, -0.024, -0.07) - left.position], 0.011)
 	forearm(left, lpc, lpc + Vector3(-0.02, -0.04, 0.045), Vector3(-0.3, -0.5, 1.0), true)
+	if scan:
+		# the scanned pistol sits ~3 cm lower (its sights are at y≈0): lift the aim / hip poses
+		return {"model": g, "hip": Vector3(0.11, -0.105, -0.4), "aim": Vector3(0, 0.0, -0.32), "flash": flash(g, Vector3(0, -0.018, -0.175), 0.22),
+			"left": left, "mag": mag, "slide": slide, "kind": "pistol"}
 	return {"model": g, "hip": Vector3(0.11, -0.13, -0.4), "aim": Vector3(0, -0.031, -0.32), "flash": flash(g, Vector3(0, 0.0, -0.18), 0.22),
 		"left": left, "mag": mag, "slide": slide, "kind": "pistol"}
+
+
+# ---------------------------------------------------------------- scanned gun models
+const SHT := preload("res://shaders/weapon_tex.gdshader")
+const PISTOL_GLTF := "res://assets/models/service_pistol/service_pistol_2k.gltf"
+static var _scan_mats := {}
+
+
+static func scan_pistol_on() -> bool:
+	return ResourceLoader.exists(PISTOL_GLTF) and not ("--oldguns" in OS.get_cmdline_user_args())
+
+
+## Viewmodel material for a scanned set (textures next to the glTF: <id>_diff/_nor_gl/_arm_<res>.jpg).
+static func scan_mat(gltf: String) -> ShaderMaterial:
+	if _scan_mats.has(gltf):
+		return _scan_mats[gltf]
+	var dir := gltf.get_base_dir() + "/textures/"
+	var base := gltf.get_file().get_basename()          # service_pistol_2k
+	var res := base.get_slice("_", base.get_slice_count("_") - 1)
+	var id := base.trim_suffix("_" + res)
+	var m := ShaderMaterial.new()
+	m.shader = SHT
+	m.set_shader_parameter("tex_alb", load(dir + "%s_diff_%s.jpg" % [id, res]))
+	m.set_shader_parameter("tex_nor", load(dir + "%s_nor_gl_%s.jpg" % [id, res]))
+	m.set_shader_parameter("tex_arm", load(dir + "%s_arm_%s.jpg" % [id, res]))
+	_scan_mats[gltf] = m
+	return m
+
+
+## Copy meshes of a scanned glTF onto gun nodes. base maps model space to gun space;
+## parts = {mesh name: node it belongs to}; offs = model-space shift per part (pieces laid out
+## beside the gun in the file, e.g. the magazine).
+static func _mount_scan(gltf: String, base: Transform3D, parts: Dictionary, offs := {}) -> void:
+	var sc: Node = (load(gltf) as PackedScene).instantiate()
+	var mat := scan_mat(gltf)
+	for nm in parts:
+		var src := sc.find_child(nm, true, false) as MeshInstance3D
+		if src == null:
+			continue
+		var xf := src.transform
+		var p := src.get_parent()
+		while p != null and p != sc and p is Node3D:
+			xf = (p as Node3D).transform * xf
+			p = p.get_parent()
+		xf.origin += offs.get(nm, Vector3.ZERO)
+		var dst: Node3D = parts[nm]
+		var mi := MeshInstance3D.new()
+		mi.mesh = src.mesh
+		mi.material_override = mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.transform = dst.transform.affine_inverse() * base * xf if dst.get_parent() != null else base * xf
+		mi.set_meta("scan", true)
+		dst.add_child(mi)
+	sc.free()
 
 
 ## Trigger-finger points for a grip centred at gc (same finger shape on every gun).
@@ -852,6 +923,22 @@ static func world_copy(i: int) -> Node3D:
 	var g := build_bare(i)
 	for mi in g.find_children("*", "MeshInstance3D", true, false):
 		var src = mi.material_override
+		if src is ShaderMaterial and (src as ShaderMaterial).shader == SHT:
+			if not _world_mats.has(src):
+				var ms := StandardMaterial3D.new()
+				ms.albedo_texture = src.get_shader_parameter("tex_alb")
+				ms.normal_enabled = true
+				ms.normal_texture = src.get_shader_parameter("tex_nor")
+				var arm: Texture2D = src.get_shader_parameter("tex_arm")
+				ms.roughness_texture = arm
+				ms.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
+				ms.metallic = 1.0
+				ms.metallic_texture = arm
+				ms.metallic_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_BLUE
+				_world_mats[src] = ms
+			mi.material_override = _world_mats[src]
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			continue
 		if src is ShaderMaterial and src.get_shader_parameter("albedo") != null:
 			if not _world_mats.has(src):
 				var m := StandardMaterial3D.new()
@@ -895,6 +982,14 @@ static func chalk_copy(i: int) -> Node3D:
 static func apply_camo(model: Node3D) -> void:
 	for mi in model.find_children("*", "MeshInstance3D", true, false):
 		var src = mi.material_override
+		if src is ShaderMaterial and (src as ShaderMaterial).shader == SHT:
+			var mt: ShaderMaterial = src.duplicate()
+			mt.set_shader_parameter("tint", Color(0.78, 0.58, 0.22))
+			mt.set_shader_parameter("camo", 0.85)
+			mt.set_shader_parameter("emission", Color(0.78, 0.58, 0.22))
+			mt.set_shader_parameter("emission_energy", 0.1)
+			mi.material_override = mt
+			continue
 		if not (src is ShaderMaterial) or src.get_shader_parameter("detail_alb_mode") == null:
 			continue
 		var dn = src.get_shader_parameter("detail_nor")
