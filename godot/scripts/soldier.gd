@@ -208,6 +208,44 @@ func _ready() -> void:
 	_build_body()
 
 
+## Horizontal direction of the next nav path point towards the player (ZERO when the path is done).
+func _path_dir(pl: Node3D) -> Vector3:
+	repath_t -= get_physics_process_delta_time()
+	if repath_t <= 0.0:
+		repath_t = 0.4
+		agent.target_position = pl.global_position
+	if agent.is_navigation_finished():
+		return Vector3.ZERO
+	var mv := agent.get_next_path_position() - global_position
+	mv.y = 0.0
+	return mv.normalized() if mv.length() > 0.01 else Vector3.ZERO
+
+
+## CharacterBody3D can't climb vertical edges, but the nav mesh links anything up to its
+## agent_max_climb (0.5 m): curbs, low crates, the lip at the foot of a ramp.
+## When blocked while walking, lift by up to STEP if there is room up there and ahead.
+const STEP := 0.5
+
+
+func _step_up(before: Vector3, want: Vector3) -> void:
+	if want.length() < 0.001 or not is_on_wall():
+		return
+	var got := Vector2(global_position.x - before.x, global_position.z - before.z).length()
+	if got > want.length() * 0.6:
+		return
+	var xf := global_transform
+	xf.origin = before
+	if test_move(xf, Vector3.UP * STEP):
+		return   # no headroom
+	xf.origin += Vector3.UP * STEP
+	var ahead := want.normalized() * maxf(want.length(), 0.12)
+	if test_move(xf, ahead):
+		return   # still a wall: too tall to step on
+	global_position = before + Vector3.UP * STEP + ahead
+	velocity.y = 0.0
+	apply_floor_snap()
+
+
 func _apply_operator() -> void:
 	var o: Dictionary = OPS.get_op(op)
 	for k in ["uniform", "uniform2", "vest", "pack", "helmet", "skin"]:
@@ -644,6 +682,14 @@ func _physics_process(delta: float) -> void:
 			strafe = 0
 		mv += Vector3(-n.z, 0, n.x) * strafe
 		spd *= 0.0 if crouch_pref else 0.6
+		# player on another floor (seen through a stairwell / window), or we are on the stairs:
+		# keep pushing along the path while firing instead of holding position mid-flight
+		var on_ramp := is_on_floor() and get_floor_normal().y < 0.97
+		if absf(pl.global_position.y - global_position.y) > 1.5 or on_ramp:
+			var pm := _path_dir(pl)
+			if pm != Vector3.ZERO:
+				mv = pm
+				spd = speed * 0.75
 		if seen_t > reaction and reload_t <= 0.0:
 			if ammo <= 0:
 				reload_t = reload_dur
@@ -658,16 +704,8 @@ func _physics_process(delta: float) -> void:
 						burst = 3 + randi() % 3
 						fire_t = randf_range(0.7, 1.6)
 	else:
-		repath_t -= delta
-		if repath_t <= 0.0:
-			repath_t = 0.4
-			agent.target_position = pl.global_position
-		if not agent.is_navigation_finished():
-			var nxt := agent.get_next_path_position()
-			mv = nxt - global_position
-			mv.y = 0.0
-			mv = mv.normalized()
-		else:
+		mv = _path_dir(pl)
+		if mv == Vector3.ZERO:
 			mv = n
 	if mv.length() > 0.01 and spd > 0.0:
 		mv = mv.normalized()
@@ -679,7 +717,9 @@ func _physics_process(delta: float) -> void:
 		velocity.x = 0.0
 		velocity.z = 0.0
 	var before := global_position
+	var want := Vector3(velocity.x, 0.0, velocity.z) * delta
 	move_and_slide()
+	_step_up(before, want)
 	var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
 	var aim_pitch := atan2(pl.global_position.y + pl.eye_height() - 0.3 - (global_position.y + 1.5 - crouch_k * 0.36), dist)
 	_animate(delta, moved, los, clampf(aim_pitch, -0.8, 0.8), clampf(wrapf(atan2(-n.x, -n.z) - facing, -PI, PI), -0.8, 0.8))

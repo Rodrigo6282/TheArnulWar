@@ -165,4 +165,6 @@ Fusil de asalto, subfusil y ametralladora: "Ak trio pack" de mightydinosaurcol
   (opengameart.org/node/156989), licencia CC-BY 3.0
   (creativecommons.org/licenses/by/3.0). Se usan los modelos AK-47, AKS-74U y RPK
   con sus texturas; el cargador se separó del modelo para las recargas.
+Camioneta UAZ: modelo de ANDREO12 en Sketchfab (sketchfab.com/ANDREO12), repintado
+  en el juego. Coche tapado con lona: "Covered Car" de Poly Haven, CC0.
 Personajes y animaciones: Mixamo (mixamo.com), de Adobe.

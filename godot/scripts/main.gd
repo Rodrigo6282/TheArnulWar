@@ -135,6 +135,8 @@ func _ready() -> void:
 		_climbtest()
 	elif has_arg("--stairtest"):
 		_stairtest()
+	elif has_arg("--botstairs"):
+		_botstairs()
 	elif has_arg("--onlinetest"):
 		_onlinetest()
 
@@ -1282,6 +1284,49 @@ func _stairtest() -> void:
 		await get_tree().create_timer(1.0).timeout
 		log.append("barrels %d -> %d soldier_dead=%s kills=%d" % [n0, get_tree().get_nodes_in_group("xbarrel").size(), str(e.dead), kills])
 	print("STAIRTEST ", " | ".join(log))
+	get_tree().quit()
+
+
+## Soldiers going upstairs: player stands on the first floor of a two-storey house, a soldier
+## starts outside; logs the nav path end and where the soldier gets to.
+func _botstairs() -> void:
+	await get_tree().process_frame
+	var log := []
+	for t in [[0, Vector3(-37.2, 0.2, -35.05)], [1, Vector3(-36.2, 0.2, -36.05)]]:
+		settings["map"] = t[0]
+		load_map(t[0])
+		start_game()
+		intermission = 999.0
+		player.god = true
+		await get_tree().create_timer(0.5).timeout
+		# walk the player up the stairs (same as --stairtest), then on along the upper floor
+		player.global_position = t[1]
+		player.velocity = Vector3.ZERO
+		player.yaw = -PI / 2
+		player.test_iz = 1.0
+		await get_tree().create_timer(2.6).timeout
+		player.test_iz = 0.0
+		await get_tree().create_timer(0.4).timeout
+		var up: Vector3 = player.global_position
+		var mapr := nav.get_navigation_map()
+		var start: Vector3 = t[1] + Vector3(-6, 0, 3)
+		var path := NavigationServer3D.map_get_path(mapr, NavigationServer3D.map_get_closest_point(mapr, start), up, true)
+		var pend := path[path.size() - 1] if path.size() > 0 else Vector3.ZERO
+		var e = SoldierScript.new()
+		e.game = self
+		add_child(e)
+		e.global_position = start + Vector3(0, 0.3, 0)
+		enemies.append(e)
+		if has_arg("--blind"):
+			e.los_t = 1.0e9   # pure path following
+		var maxy := 0.0
+		for k in 60:
+			await get_tree().create_timer(0.25).timeout
+			maxy = maxf(maxy, e.global_position.y)
+		log.append("map%d player=(%.1f,%.2f,%.1f) path_n=%d end=(%.1f,%.2f,%.1f) bot=(%.1f,%.2f,%.1f) bot_maxy=%.2f" % [t[0], up.x, up.y, up.z, path.size(), pend.x, pend.y, pend.z, e.global_position.x, e.global_position.y, e.global_position.z, maxy])
+		e.queue_free()
+		enemies.erase(e)
+	print("BOTSTAIRS ", " | ".join(log))
 	get_tree().quit()
 
 

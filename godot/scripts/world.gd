@@ -335,7 +335,7 @@ static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: D
 	var iz1 := z1 - t * 0.5
 	var run := 6.0
 	var hx1 := ix0 + run + 0.4
-	var hz1 := iz0 + 1.5
+	var hz1 := iz0 + 2.0   # stairwell 2 m deep: 1.9 m stairs keep a path after nav erosion (0.5 m a side)
 	blk(p, (hx1 + ix1) * 0.5, h1, (iz0 + iz1) * 0.5, ix1 - hx1, slab, iz1 - iz0, floor_m)
 	rects.pop_back()
 	blk(p, (ix0 + hx1) * 0.5, h1, (hz1 + iz1) * 0.5, hx1 - ix0, slab, iz1 - hz1, floor_m)
@@ -344,8 +344,8 @@ static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: D
 	blk(p, (ix0 + hx1) * 0.5 - 0.3, fy, hz1 + 0.05, hx1 - ix0 - 0.6, 1.0, 0.1, trim)
 	rects.pop_back()
 	# stairs: sloped collider + visual steps
-	var xa := ix0 + 0.4
-	var zc := iz0 + 0.75
+	var xa := ix0 + 1.4   # 1.4 m landing at the foot: the way on is from the front (railed side)
+	var zc := iz0 + 1.0
 	var rise := fy
 	var ang := atan2(rise, hx1 - xa)
 	var ln := sqrt(rise * rise + (hx1 - xa) * (hx1 - xa))
@@ -354,15 +354,42 @@ static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: D
 	sb.rotation.z = ang
 	var cs := CollisionShape3D.new()
 	var bs := BoxShape3D.new()
-	bs.size = Vector3(ln, 0.2, 1.4)
+	bs.size = Vector3(ln, 0.2, 1.9)
 	cs.shape = bs
 	sb.add_child(cs)
 	p.add_child(sb)
+	# handrail on the open side: a real rail + an invisible sloped wall under it, so the nav mesh
+	# can't link the ground to the side of the ramp (bots got stuck against its 0.5+ m edge).
+	# Convex slab with vertical ends (a rotated box leaned back over the landing and closed it).
+	var rz := zc + 1.0
+	var r0 := xa + 0.2
+	var slope := rise / (hx1 - xa)
+	var y0 := (r0 - xa) * slope
+	var pts := PackedVector3Array()
+	for zz in [-0.05, 0.05]:
+		for v in [Vector2(r0, y0 - 0.15), Vector2(r0, y0 + 1.0), Vector2(hx1, rise - 0.15), Vector2(hx1, rise + 1.0)]:
+			pts.append(Vector3(v.x, v.y, rz + zz))
+	var wall := StaticBody3D.new()
+	var wcs := CollisionShape3D.new()
+	var cps := ConvexPolygonShape3D.new()
+	cps.points = pts
+	wcs.shape = cps
+	wall.add_child(wcs)
+	p.add_child(wall)
+	var rl := sqrt(pow(hx1 - r0, 2) + pow(rise - y0, 2))
+	var bar := BoxMesh.new()
+	bar.size = Vector3(rl, 0.06, 0.06)
+	mesh_node(p, bar, trim, Vector3((r0 + hx1) * 0.5, (y0 + rise) * 0.5 + 0.95, rz), Vector3(0, 0, ang))
+	var post := BoxMesh.new()
+	post.size = Vector3(0.05, 0.95, 0.05)
+	for k in 7:
+		var px := r0 + (hx1 - r0) * k / 6.0
+		mesh_node(p, post, trim, Vector3(px, (px - xa) * slope + 0.475, rz), Vector3.ZERO, false)
 	var n := 15
 	var sw := (hx1 - xa) / n
 	for k in n:
-		blk(p, xa + sw * (k + 0.5), 0.0, zc, sw + 0.01, rise * (k + 1) / n, 1.4, floor_m, false)
-	rects.append([xa, zc - 0.7, hx1, zc + 0.7, rise])
+		blk(p, xa + sw * (k + 0.5), 0.0, zc, sw + 0.01, rise * (k + 1) / n, 1.9, floor_m, false)
+	rects.append([xa, zc - 0.95, hx1, zc + 0.95, rise])
 	# roof
 	var top := fy + h2
 	blk(p, cx, top, cz, w + 0.3, 0.25, d + 0.3, roofm)
@@ -410,10 +437,116 @@ static func furnish(p: Node3D, ix0: float, iz0: float, ix1: float, iz1: float, y
 		prop_c(p, "plastic_crate_02", ix0 + 0.5, iz0 + 0.45, 0.2, 1.0, y)
 
 
+## Vehicle models: "uaz_truck" (UAZ pickup by ANDREO12, Sketchfab: flat-colour parts, one material per
+## mesh, repainted here) and Poly Haven "covered_car" (CC0 scan). Both have their length on Z.
+const UAZ_SCALE := 1.2   # model is 3.7 m long; the real pickup is ~4.5 m
+
+
+## Double-sided material for the UAZ (its panels are single sheets, like the glTF's doubleSided materials);
+## `tex_id` adds a scanned set (world triplanar: the model's nested axes stretch object-space triplanar).
+static func _vm(c: Color, rough: float, metal: float, tex_id := "", nscale := 1.0, uv := 0.9) -> StandardMaterial3D:
+	var key := "veh|%s|%s|%s|%s|%s" % [c.to_html(), rough, metal, tex_id, nscale]
+	if _mats.has(key):
+		return _mats[key]
+	var m := StandardMaterial3D.new()
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.albedo_color = c
+	m.roughness = rough
+	m.metallic = metal
+	if tex_id != "":
+		m.normal_enabled = true
+		m.normal_texture = tex(tex_id, "nor")
+		m.normal_scale = nscale
+		m.roughness_texture = tex(tex_id, "rough")
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_RED
+		m.uv1_triplanar = true
+		m.uv1_world_triplanar = true
+		m.uv1_scale = Vector3.ONE * uv
+		m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	_mats[key] = m
+	return m
+
+
+static func _uaz_mats(paint: Color, burnt: bool) -> Dictionary:
+	var body: StandardMaterial3D
+	if burnt:   # scorched: the scanned rusty paint with its own albedo, darkened toward soot
+		var key := "uazburnt|%s" % paint.to_html()
+		if not _mats.has(key):
+			var bm: StandardMaterial3D = _vm(Color.WHITE, 1.0, 0.4, "rusty_metal_02", 1.0, 0.7).duplicate()
+			bm.albedo_texture = tex("rusty_metal_02", "diff")
+			bm.albedo_color = paint.lerp(Color(0.22, 0.19, 0.17), 0.55)
+			_mats[key] = bm
+		body = _mats[key]
+	else:
+		var key := "uazpaint|%s" % paint.to_html()
+		if not _mats.has(key):
+			# scanned painted-metal normal + roughness: dents and dull patches instead of a toy-like gloss
+			var pm: StandardMaterial3D = _vm(paint, 1.0, 0.3, "green_metal_rust", 0.6, 0.5).duplicate()
+			pm.clearcoat_enabled = true
+			pm.clearcoat = 0.5
+			pm.clearcoat_roughness = 0.35
+			_mats[key] = pm
+		body = _mats[key]
+	var rubber := _vm(Color(0.05, 0.05, 0.05), 0.95, 0.0) if burnt else _vm(Color(0.07, 0.07, 0.07), 1.0, 0.0, "asphalt_02", 0.6, 3.0)
+	var steel := _vm(Color(0.2, 0.17, 0.15), 0.85, 0.6) if burnt else _vm(Color(0.55, 0.55, 0.53), 0.3, 1.0)
+	return {
+		"detali": body,
+		"Matte__FF00FFFF__3rd_spec_": _vm(Color(0.12, 0.1, 0.09), 0.9, 0.5) if burnt else _vm(paint.darkened(0.35), 0.5, 0.4),
+		"Matte__FF0F0F0F": rubber,
+		"Matte__FFF7F7F7": rubber,
+		"Matte__FFF4F4F4__spec_": steel,
+		"hrom": _vm(Color(0.1, 0.09, 0.08), 0.9, 0.5) if burnt else _vm(Color(0.16, 0.16, 0.16), 0.6, 0.6, "metal_plate", 0.6, 1.5),   # bed floor, bumpers
+		"plastik": _vm(Color(0.04, 0.04, 0.04), 0.9, 0.0) if burnt else _vm(Color(0.09, 0.09, 0.09), 0.6, 0.0),
+		"2": _vm(Color(0.08, 0.05, 0.04), 0.9, 0.0) if burnt else _vm(Color(0.55, 0.06, 0.03), 0.3, 0.0),
+		"glass": null if burnt else _vm(Color(0.03, 0.04, 0.05), 0.04, 0.9),
+	}
+
+
+static func _car_model(p: Node3D, x: float, z: float, rot: float, paint: Color, burning: bool) -> void:
+	# intact cars alternate between the pickup and the tarp-covered car (stable per position, no rng draw)
+	var covered := not burning and (int(absf(x * 7.0 + z * 13.0)) % 2 == 0)
+	var id := "covered_car" if covered else "uaz_truck"
+	var s := 1.0 if covered else UAZ_SCALE
+	var tilt := Vector3.ZERO
+	var y0 := 0.0
+	if burning:   # burnt out: tyres gone, it sags onto its rims
+		tilt = Vector3(0.025, 0.0, -0.03)
+		y0 = -0.12
+	var n := prop(p, id, x, z, rot + PI / 2, s, y0, true, tilt)
+	var mats := {} if covered else _uaz_mats(paint, burning)
+	var stack: Array = [n]
+	while not stack.is_empty():
+		var nd: Node = stack.pop_back()
+		stack.append_array(nd.get_children())
+		if not (nd is MeshInstance3D):
+			continue
+		var mi := nd as MeshInstance3D
+		mi.visibility_range_end = 0.0   # big landmarks: never fade out
+		if covered:
+			if mi.name == "covered_car":   # tint only the tarp (the wheels share its material)
+				var tm: StandardMaterial3D = (mi.mesh.surface_get_material(0) as StandardMaterial3D).duplicate()
+				tm.albedo_color = Color.WHITE.lerp(paint.lightened(0.35), 0.55)
+				mi.material_override = tm
+			continue
+		var mname := mi.mesh.surface_get_material(0).resource_name if mi.mesh.get_surface_count() > 0 and mi.mesh.surface_get_material(0) else ""
+		if mats.has(mname):
+			if mats[mname] == null:
+				mi.visible = false   # wrecks: windows blown out
+			else:
+				mi.material_override = mats[mname]
+		else:
+			mi.material_override = _vm(Color(0.06, 0.06, 0.06), 0.8, 0.0)
+
+
 static func car(p: Node3D, x: float, z: float, rot: float, paint: Color, burning: bool, fx_list: Array) -> void:
 	var hx := 0.95 if rot != 0.0 else 2.1
 	var hz := 2.1 if rot != 0.0 else 0.95
 	if not is_free(x, z, 0.0):
+		return
+	if has_model("uaz_truck") and has_model("covered_car"):
+		_car_model(p, x, z, rot, paint, burning)
+		if burning:
+			fx_list.append(Vector3(x, 1.6, z))
 		return
 	var root := StaticBody3D.new()
 	root.position = Vector3(x, 0, z)

@@ -354,7 +354,7 @@ func _build_menu() -> void:
 	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(ver)
 	# attribution required by the CC-BY models (full credits in LEEME.txt)
-	var cred := _label("Modelos 3D: Poly Haven (CC0) · Fusil, subfusil y ametralladora: \"Ak trio pack\" de mightydinosaurcol (CC-BY 3.0, OpenGameArt) · Personajes: Mixamo", 12, Color(0.7, 0.73, 0.71), 3)
+	var cred := _label("Modelos 3D: Poly Haven (CC0) · Fusil, subfusil y ametralladora: \"Ak trio pack\" de mightydinosaurcol (CC-BY 3.0, OpenGameArt) · Camioneta UAZ: ANDREO12 (Sketchfab) · Personajes: Mixamo", 12, Color(0.7, 0.73, 0.71), 3)
 	cred.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(cred)
 	if game.updater:
