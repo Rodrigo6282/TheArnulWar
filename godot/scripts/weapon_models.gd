@@ -602,28 +602,51 @@ static func pistol() -> Dictionary:
 # ---------------------------------------------------------------- scanned gun models
 const SHT := preload("res://shaders/weapon_tex.gdshader")
 const PISTOL_GLTF := "res://assets/models/service_pistol/service_pistol_2k.gltf"
+const RIFLE_GLTF := "res://assets/models/bolt_action_rifle_7_62/bolt_action_rifle_7_62_2k.gltf"
+const STICK_GLTF := "res://assets/models/stick_grenade/stick_grenade_2k.gltf"
 static var _scan_mats := {}
+static var _surf_cache := {}
+
+
+static func scan_on(gltf: String) -> bool:
+	return ResourceLoader.exists(gltf) and not ("--oldguns" in OS.get_cmdline_user_args())
 
 
 static func scan_pistol_on() -> bool:
-	return ResourceLoader.exists(PISTOL_GLTF) and not ("--oldguns" in OS.get_cmdline_user_args())
+	return scan_on(PISTOL_GLTF)
 
 
-## Viewmodel material for a scanned set (textures next to the glTF: <id>_diff/_nor_gl/_arm_<res>.jpg).
-static func scan_mat(gltf: String) -> ShaderMaterial:
-	if _scan_mats.has(gltf):
-		return _scan_mats[gltf]
-	var dir := gltf.get_base_dir() + "/textures/"
-	var base := gltf.get_file().get_basename()          # service_pistol_2k
-	var res := base.get_slice("_", base.get_slice_count("_") - 1)
-	var id := base.trim_suffix("_" + res)
+## Viewmodel material from a glTF material (albedo, normal and the ARM image that the importer
+## assigns as roughness/metallic texture: R occlusion, G roughness, B metallic).
+static func scan_mat(src: Material) -> ShaderMaterial:
+	if _scan_mats.has(src):
+		return _scan_mats[src]
 	var m := ShaderMaterial.new()
 	m.shader = SHT
-	m.set_shader_parameter("tex_alb", load(dir + "%s_diff_%s.jpg" % [id, res]))
-	m.set_shader_parameter("tex_nor", load(dir + "%s_nor_gl_%s.jpg" % [id, res]))
-	m.set_shader_parameter("tex_arm", load(dir + "%s_arm_%s.jpg" % [id, res]))
-	_scan_mats[gltf] = m
+	var sm := src as BaseMaterial3D
+	if sm:
+		m.set_shader_parameter("tex_alb", sm.albedo_texture)
+		m.set_shader_parameter("tex_nor", sm.normal_texture)
+		m.set_shader_parameter("tex_arm", sm.roughness_texture if sm.roughness_texture else sm.metallic_texture)
+	_scan_mats[src] = m
 	return m
+
+
+## One single-surface mesh per material, so every piece can carry its own material_override
+## (camo, world copies and chalk all work on material_override).
+static func _surfaces(mesh: Mesh) -> Array:
+	if _surf_cache.has(mesh):
+		return _surf_cache[mesh]
+	var out := []
+	if mesh.get_surface_count() == 1:
+		out.append([mesh, mesh.surface_get_material(0)])
+	else:
+		for s in mesh.get_surface_count():
+			var am := ArrayMesh.new()
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, mesh.surface_get_arrays(s))
+			out.append([am, mesh.surface_get_material(s)])
+	_surf_cache[mesh] = out
+	return out
 
 
 ## Copy meshes of a scanned glTF onto gun nodes. base maps model space to gun space;
@@ -631,7 +654,6 @@ static func scan_mat(gltf: String) -> ShaderMaterial:
 ## beside the gun in the file, e.g. the magazine).
 static func _mount_scan(gltf: String, base: Transform3D, parts: Dictionary, offs := {}) -> void:
 	var sc: Node = (load(gltf) as PackedScene).instantiate()
-	var mat := scan_mat(gltf)
 	for nm in parts:
 		var src := sc.find_child(nm, true, false) as MeshInstance3D
 		if src == null:
@@ -643,14 +665,47 @@ static func _mount_scan(gltf: String, base: Transform3D, parts: Dictionary, offs
 			p = p.get_parent()
 		xf.origin += offs.get(nm, Vector3.ZERO)
 		var dst: Node3D = parts[nm]
-		var mi := MeshInstance3D.new()
-		mi.mesh = src.mesh
-		mi.material_override = mat
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		mi.transform = dst.transform.affine_inverse() * base * xf if dst.get_parent() != null else base * xf
-		mi.set_meta("scan", true)
-		dst.add_child(mi)
+		for sf in _surfaces(src.mesh):
+			var mi := MeshInstance3D.new()
+			mi.mesh = sf[0]
+			var sm: Material = src.get_surface_override_material(0) if src.mesh.get_surface_count() == 1 and src.get_surface_override_material(0) else sf[1]
+			mi.material_override = scan_mat(sm)
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.transform = dst.transform.affine_inverse() * base * xf if dst.get_parent() != null else base * xf
+			mi.set_meta("scan", true)
+			dst.add_child(mi)
 	sc.free()
+
+
+## Sniper on the scanned bolt-action rifle (Poly Haven "bolt_action_rifle_7_62", CC0, 1.23 m like
+## the procedural one). Model: muzzle +X, bore at y≈0.045, trigger x≈-0.29; the bolt (bolt_a,
+## closed) rides on `handle`, now on the bore axis so the bolt lift turns around it. Straight wrist
+## (no pistol grip): the right hand sits behind the trigger guard, the left under the wooden forend.
+static func _sniper_scan(g: Node3D, handle: Node3D, mag: Node3D) -> Dictionary:
+	_clear_proc(g, [handle, mag])
+	handle.position = Vector3(0, 0.015, 0.0)
+	var base := Transform3D(Basis(Vector3.UP, PI / 2), Vector3(0, -0.03, -0.239))
+	_mount_scan(RIFLE_GLTF, base, {"bolt_action_rifle_7_62": g, "bolt_action_rifle_7_62_scope": g,
+		"bolt_action_rifle_7_62_wrap": g, "bolt_action_rifle_7_62_trigger": g, "bolt_action_rifle_7_62_bolt_a": handle})
+	var gc := Vector3(0, -0.035, 0.105)
+	var ga := Basis(Vector3.RIGHT, -0.75) * Vector3.UP
+	right_grip(g, gc, ga, 0.021, [Vector3(0.014, -0.022, 0.075), Vector3(0.012, -0.032, 0.058), Vector3(0.008, -0.042, 0.05)], Vector3(0.18, -0.42, 1.0))
+	var left := Node3D.new()
+	left.position = Vector3(0, -0.01, -0.3)
+	g.add_child(left)
+	left_guard(left, Vector3(0, 0.025, 0), 0.024, Vector3(-0.32, -0.45, 1.0))
+	return {"model": g, "hip": Vector3(0.14, -0.17, -0.5), "aim": Vector3(0, -0.041, -0.2), "flash": flash(g, Vector3(0, 0.015, -0.86), 0.4),
+		"left": left, "mag": mag, "handle": handle, "bolt": true, "kind": "mag"}
+
+
+## Gun-root children that are procedural geometry (everything except the listed movable nodes).
+static func _clear_proc(g: Node3D, keep: Array) -> void:
+	for c in g.get_children():
+		if not (c in keep):
+			c.free()
+	for k in keep:
+		for c in (k as Node).get_children():
+			c.free()
 
 
 ## Trigger-finger points for a grip centred at gc (same finger shape on every gun).
@@ -785,6 +840,8 @@ static func sniper() -> Dictionary:
 	ring(g, 0.009, 0.002, steel, Vector3(0, -0.06, -0.42)).rotation = Vector3(0, PI / 2, 0)
 	ring(g, 0.009, 0.002, steel, Vector3(0, -0.11, 0.33)).rotation = Vector3(0, PI / 2, 0)
 	rail(g, Vector3(0, 0.044, -0.05), 0.2, dark, black)
+	if scan_on(RIFLE_GLTF):
+		return _sniper_scan(g, handle, mag)
 	var gc := Vector3(0, -0.075, 0.085)
 	right_grip(g, gc, Basis(Vector3.RIGHT, -0.35) * Vector3.UP, 0.023, trig_pts(gc), Vector3(0.18, -0.42, 1.0))
 	var left := Node3D.new()
@@ -881,6 +938,12 @@ static func knife() -> Node3D:
 ## Frag grenade held in a right fist (shown during the throw).
 static func grenade_hand() -> Node3D:
 	var k := Node3D.new()
+	if scan_on(STICK_GLTF):
+		# scanned stick grenade (Poly Haven "stick_grenade", CC0): fist around the wooden handle,
+		# head pointing forward (model +Y → -Z)
+		_mount_scan(STICK_GLTF, Transform3D(Basis(Vector3.RIGHT, -PI / 2), Vector3(0, 0, -0.07)), {"stick_grenade": k})
+		left_guard(k, Vector3(0, 0, -0.03), 0.02, Vector3(0.25, -0.55, 1.0), Vector3(0, 0, 1))
+		return k
 	var body := SphereMesh.new()
 	body.radius = 0.032
 	body.height = 0.07

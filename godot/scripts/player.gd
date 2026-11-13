@@ -870,16 +870,22 @@ func _spawn_grenade() -> void:
 	sh.radius = 0.05
 	cs.shape = sh
 	rb.add_child(cs)
-	var mi := MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = 0.05
-	sm.height = 0.1
-	mi.mesh = sm
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.22, 0.27, 0.17)
-	m.roughness = 0.6
-	mi.material_override = m
-	rb.add_child(mi)
+	if WM.scan_on(WM.STICK_GLTF):
+		# scanned stick grenade with its own glTF materials, centred on the body
+		var sg: Node3D = (load(WM.STICK_GLTF) as PackedScene).instantiate()
+		sg.position.y = -0.03
+		rb.add_child(sg)
+	else:
+		var mi := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.05
+		sm.height = 0.1
+		mi.mesh = sm
+		var m := StandardMaterial3D.new()
+		m.albedo_color = Color(0.22, 0.27, 0.17)
+		m.roughness = 0.6
+		mi.material_override = m
+		rb.add_child(mi)
 	game.add_child(rb)
 	var b := camera.global_transform.basis
 	rb.global_position = camera.global_position + b.x * 0.15 - b.z * 0.5 + b.y * 0.05
