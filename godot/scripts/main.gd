@@ -17,7 +17,7 @@ const DIFF_ACC := [0.6, 1.0, 1.35]
 const DIFF_DMG := [0.6, 1.0, 1.45]
 const BUY_NAMES := {0: "AR-7 FUSIL", 1: "M-12 ESCOPETA", 2: "P9 MUNICIÓN", 3: "V-9 SUBFUSIL", 4: "R-700 FRANCOTIRADOR", 5: "K-90 AMETRALLADORA"}
 
-var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "ffa"}
+var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "ffa", "voice": 0}
 var state := "menu"
 var mode := "ops"
 var map_idx := 0
@@ -612,6 +612,16 @@ func interact() -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var k: int = event.physical_keycode
+		# multiplayer text chat: Enter opens it, Esc closes it (Enter inside it sends)
+		if ui.chat_open:
+			if k == KEY_ESCAPE:
+				ui.close_chat()
+				get_viewport().set_input_as_handled()
+			return
+		if (k == KEY_ENTER or k == KEY_KP_ENTER) and not event.alt_pressed and net.active and state == "playing":
+			ui.open_chat()
+			get_viewport().set_input_as_handled()
+			return
 		if k == KEY_ESCAPE:
 			if state == "playing":
 				pause()
@@ -1067,13 +1077,22 @@ func _mptest(role: String) -> void:
 			var fc := FileAccess.open("user://rtc_test_code.txt", FileAccess.WRITE)
 			fc.store_string("%s|%d" % [net.invite_code, int(Time.get_unix_time_from_system())])
 			fc.close()
-		player.god = true
-		if zm:
-			zm.inter = 2.0
 		var t := 0.0
 		while net.players.size() < 2 and t < (60.0 if rtc else 20.0):
 			await get_tree().create_timer(0.25).timeout
 			t += 0.25
+		# lobby: the client chats and talks (test tone) before the match starts
+		await get_tree().create_timer(3.0).timeout
+		var chats := []
+		for c in net.chat_log:
+			if not c.sys:
+				chats.append("%s:%s" % [c.name, c.text])
+		log.append("lobby state=%s started=%s chat=%s voz_paquetes=%d" % [state, str(net.started), str(chats), net.voice.received])
+		net.start_match()
+		await get_tree().create_timer(1.0).timeout
+		player.god = true
+		if zm:
+			zm.inter = 2.0
 		log.append("mode=%s players=%d" % [net.gmode, net.players.size()])
 		await get_tree().create_timer(4.0).timeout
 		var cid := 0
@@ -1097,7 +1116,7 @@ func _mptest(role: String) -> void:
 		if mm == "tdm":
 			log.append("team_kills=%s" % str(net.team_kills))
 		if mm == "zombies":
-			log.append("host_zombies_end=%d" % alive_count())
+			log.append("host_zombies_end=%d pts_cliente=%d" % [alive_count(), int(net.pts.get(cid, -1))])
 	else:
 		await get_tree().create_timer(1.5).timeout
 		if role == "lanjoin":   # find the host through the LAN beacon instead of a typed IP
@@ -1135,6 +1154,14 @@ func _mptest(role: String) -> void:
 		else:
 			net.join("Cliente", "127.0.0.1")
 		var t2 := 0.0
+		# lobby first: say hello in the chat and send a second of test voice
+		while not (ui.lobby_p.visible and net.players.size() >= 2) and state != "playing" and t2 < 60.0:
+			await get_tree().create_timer(0.25).timeout
+			t2 += 0.25
+		log.append("en_sala=%s jugadores=%d" % [str(ui.lobby_p.visible), net.players.size()])
+		net.send_chat("hola desde el cliente")
+		net.voice.test_tone = 1.0
+		t2 = 0.0
 		while state != "playing" and t2 < 20.0:
 			await get_tree().create_timer(0.25).timeout
 			t2 += 0.25
@@ -1170,7 +1197,7 @@ func _mptest(role: String) -> void:
 		else:
 			net.send_hit(1, 60.0, false)
 			net.send_hit(1, 60.0, false)
-		await get_tree().create_timer(6.0).timeout
+		await get_tree().create_timer(9.0).timeout
 		if net.gmode == "gun":
 			log.append("client_owned=%s" % str(player.owned))
 		log.append("alive_after_respawn=%s" % str(player != null and player.alive))
@@ -1502,6 +1529,25 @@ func _shot(kind: String, out: String) -> void:
 	elif kind == "mp":
 		ui.show_mp()
 		await get_tree().create_timer(3.0).timeout
+	elif kind == "lobby" or kind == "coophud":
+		# fake teammates (no second PC needed) to look at the lobby / co-op HUD
+		net.host("Rodri", 3 if kind == "coophud" else 0, net.PORT, "zombies" if kind == "coophud" else "tdm", false)
+		for k in 3:
+			net.players[k + 2] = net._new_player(["Lucía", "Marcos", "Zombikiller"][k], k)
+			net.pts[k + 2] = [2350, 870, 4120][k]
+		net.alive_map[4] = false
+		net.voice.heard[3] = Time.get_ticks_msec() + 100000
+		net.add_chat("Lucía", "¿Empezamos ya?", false, net.player_col(2))
+		net.add_chat("Marcos", "Dadme un segundo que voy a por agua", false, net.player_col(3))
+		net.add_chat("Rodri", "Venga, en cuanto vuelvas arrancamos", false, net.player_col(1))
+		net.lobby_changed.emit()
+		if kind == "coophud":
+			net.start_match()
+			await get_tree().create_timer(1.0).timeout
+			player.god = true
+			zm.points = 1500
+			net.add_chat("Lucía", "Abrid la puerta del patio, yo cubro", false, net.player_col(2))
+		await get_tree().create_timer(2.5).timeout
 	elif kind == "zwall" or kind == "zbox":
 		start_game()
 		player.god = true

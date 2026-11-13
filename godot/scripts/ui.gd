@@ -70,6 +70,26 @@ var op_vp: SubViewport
 var op_model
 var op_btn: Button
 var perk_row: HBoxContainer
+# multiplayer lobby / chat / co-op player list
+var lobby_p: Control
+var lob_info: Label
+var lob_code: HBoxContainer
+var lob_code_l: Label
+var lob_list: VBoxContainer
+var lob_chat: VBoxContainer
+var lob_chat_scroll: ScrollContainer
+var lob_in: LineEdit
+var lob_start: Button
+var lob_team: Button
+var lob_wait: Label
+var lob_voice: OptionButton
+var v_opt: OptionButton
+var chat_box: VBoxContainer
+var chat_in: LineEdit
+var chat_open := false
+var coop_box: VBoxContainer
+var coop_t := 0.0
+var lob_t := 0.0
 var mini_tex: ImageTexture
 const MINI_SIZE := 210.0
 const MINI_RANGE := 34.0          # metres from the centre to the edge
@@ -152,6 +172,8 @@ func setup(g) -> void:
 	_build_over()
 	_build_mp()
 	_build_ops()
+	_build_lobby()
+	_build_chat()
 
 
 func _make_theme() -> Theme:
@@ -315,10 +337,13 @@ func _build_menu() -> void:
 		game.save_settings()
 	)
 	grid.add_child(d_opt)
+	grid.add_child(_label("Chat de voz", 17))
+	v_opt = _voice_option()
+	grid.add_child(v_opt)
 	profile_l = _label("", 16, GOLD, 3)
 	profile_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(profile_l)
-	var help := _label("WASD moverse · Ratón mirar · Clic izq. disparar · Clic der. apuntar · Shift correr · Espacio saltar · C agacharse · Q / E inclinarse\nR recargar · 1-6 o rueda cambiar arma · V cuchillo · G granada · B racha · F interactuar (zombis) · Esc pausa · Alt+Intro pantalla completa", 14, Color(0.85, 0.88, 0.86), 3)
+	var help := _label("WASD moverse · Ratón mirar · Clic izq. disparar · Clic der. apuntar · Shift correr · Espacio saltar · C agacharse · Q / E inclinarse\nR recargar · 1-6 o rueda cambiar arma · V cuchillo · G granada · B racha · F interactuar (zombis) · Esc pausa · Alt+Intro pantalla completa\nMultijugador: Intro escribir en el chat · T (mantener) hablar por voz · Tab marcador", 14, Color(0.85, 0.88, 0.86), 3)
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(help)
 	var row2 := HBoxContainer.new()
@@ -346,6 +371,9 @@ func sync_settings() -> void:
 	fs_chk.set_pressed_no_signal(game.settings.fullscreen)
 	sens_sl.set_value_no_signal(game.settings.sens)
 	sens_l.text = "%.2f" % game.settings.sens
+	for vo in [v_opt, lob_voice]:
+		if vo:
+			vo.select(int(game.settings.get("voice", 0)))
 	for i in map_btns.size():
 		var on: bool = i == game.map_idx
 		var b: Button = map_btns[i]
@@ -951,6 +979,8 @@ func _refresh_lan() -> void:
 
 func show_mp() -> void:
 	menu.visible = false
+	if lobby_p:
+		lobby_p.visible = false
 	over_p.visible = false
 	pause_p.visible = false
 	hud.visible = false
@@ -1014,6 +1044,8 @@ func mp_status(t: String) -> void:
 
 
 func show_menu() -> void:
+	if lobby_p:
+		lobby_p.visible = false
 	if mp_p:
 		mp_p.visible = false
 	if op_p:
@@ -1259,6 +1291,7 @@ func tick(delta: float) -> void:
 		op_model.net_yaw += delta * 0.6
 	radar_c.queue_redraw()
 	mini.queue_redraw()
+	_tick_mp(delta)
 	if not hud.visible or game.player == null or not is_instance_valid(game.player):
 		return
 	var p = game.player
@@ -1370,3 +1403,417 @@ func tick(delta: float) -> void:
 	ch[1].position = Vector2(-1, gap)
 	ch[2].position = Vector2(-gap - 10, -1)
 	ch[3].position = Vector2(gap, -1)
+
+
+# ---------------------------------------------------------------- multiplayer: lobby, chat, co-op list
+func _voice_option() -> OptionButton:
+	var o := OptionButton.new()
+	for n in ["Mantener T para hablar", "Micrófono abierto", "Desactivado"]:
+		o.add_item(n)
+	o.select(int(game.settings.get("voice", 0)))
+	o.item_selected.connect(func(i):
+		game.settings["voice"] = i
+		game.save_settings()
+		sync_settings()
+	)
+	return o
+
+
+## Small microphone icon: green while that player talks.
+func _mic_icon() -> Control:
+	var c := Control.new()
+	c.custom_minimum_size = Vector2(16, 22)
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.draw.connect(func():
+		var col: Color = Color(0.35, 1.0, 0.45) if c.get_meta("on", false) else Color(1, 1, 1, 0.2)
+		c.draw_circle(Vector2(8, 5), 3.5, col)
+		c.draw_rect(Rect2(4.5, 5, 7, 6), col)
+		c.draw_circle(Vector2(8, 11), 3.5, col)
+		c.draw_arc(Vector2(8, 11), 6.0, 0.0, PI, 12, col, 1.5)
+		c.draw_line(Vector2(8, 17), Vector2(8, 20), col, 1.5)
+		c.draw_line(Vector2(4, 20.5), Vector2(12, 20.5), col, 1.5)
+	)
+	return c
+
+
+func _card(parent: Control, title: String, size: Vector2) -> VBoxContainer:
+	var pc := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.03, 0.04, 0.04, 0.75)
+	sb.set_corner_radius_all(8)
+	sb.set_content_margin_all(14)
+	sb.border_color = Color(0.95, 0.69, 0.2, 0.55)
+	sb.set_border_width_all(1)
+	pc.add_theme_stylebox_override("panel", sb)
+	pc.custom_minimum_size = size
+	parent.add_child(pc)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	pc.add_child(v)
+	var h := _label(title, 22, GOLD, 4)
+	h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(h)
+	return v
+
+
+func _build_lobby() -> void:
+	lobby_p = _overlay()
+	var vb: VBoxContainer = lobby_p.get_meta("box")
+	var t := _label("SALA DE ESPERA", 48, GOLD, 8)
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(t)
+	lob_info = _label("", 18, Color(0.92, 0.94, 0.92), 3)
+	lob_info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(lob_info)
+	lob_code = HBoxContainer.new()
+	lob_code.alignment = BoxContainer.ALIGNMENT_CENTER
+	lob_code.add_theme_constant_override("separation", 12)
+	vb.add_child(lob_code)
+	lob_code_l = _label("", 22, Color.WHITE, 4)
+	lob_code.add_child(lob_code_l)
+	var cb := _button(lob_code, "Copiar código", func():
+		DisplayServer.clipboard_set(game.net.invite_code)
+		lob_wait.text = "Código copiado: pégalo a tus amigos"
+	, true)
+	cb.custom_minimum_size = Vector2(170, 0)
+	cb.set_meta("copy", true)
+	var cols := HBoxContainer.new()
+	cols.alignment = BoxContainer.ALIGNMENT_CENTER
+	cols.add_theme_constant_override("separation", 20)
+	vb.add_child(cols)
+	var pl := _card(cols, "JUGADORES", Vector2(380, 340))
+	lob_list = VBoxContainer.new()
+	lob_list.add_theme_constant_override("separation", 6)
+	pl.add_child(lob_list)
+	var ch2 := _card(cols, "CHAT", Vector2(560, 340))
+	lob_chat_scroll = ScrollContainer.new()
+	lob_chat_scroll.custom_minimum_size = Vector2(0, 240)
+	lob_chat_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	ch2.add_child(lob_chat_scroll)
+	lob_chat = VBoxContainer.new()
+	lob_chat.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lob_chat_scroll.add_child(lob_chat)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	ch2.add_child(row)
+	lob_in = LineEdit.new()
+	lob_in.placeholder_text = "Escribe un mensaje..."
+	lob_in.max_length = 120
+	lob_in.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(lob_in)
+	var send := func(_x = null):
+		game.net.send_chat(lob_in.text)
+		lob_in.text = ""
+		lob_in.grab_focus()
+	lob_in.text_submitted.connect(send)
+	var sbt := _button(row, "Enviar", func(): send.call(), true)
+	sbt.custom_minimum_size = Vector2(110, 0)
+	var vr := HBoxContainer.new()
+	vr.alignment = BoxContainer.ALIGNMENT_CENTER
+	vr.add_theme_constant_override("separation", 12)
+	vb.add_child(vr)
+	vr.add_child(_label("Chat de voz", 17))
+	lob_voice = _voice_option()
+	vr.add_child(lob_voice)
+	vr.add_child(_label("·  En la partida: Intro para escribir, T para hablar", 15, Color(0.85, 0.88, 0.86), 3))
+	lob_wait = _label("", 18, GOLD, 4)
+	lob_wait.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(lob_wait)
+	var br := HBoxContainer.new()
+	br.alignment = BoxContainer.ALIGNMENT_CENTER
+	br.add_theme_constant_override("separation", 14)
+	vb.add_child(br)
+	lob_start = _button(br, "INICIAR PARTIDA", func(): game.net.start_match())
+	lob_team = _button(br, "Cambiar de equipo", func(): game.net.switch_team(), true)
+	_button(br, "Salir de la sala", func():
+		game.net.leave()
+		show_mp()
+	, true)
+	lobby_p.visible = false
+	game.net.lobby_changed.connect(refresh_lobby)
+	game.net.chat_added.connect(_refresh_chat)
+
+
+func show_lobby() -> void:
+	menu.visible = false
+	if mp_p:
+		mp_p.visible = false
+	if op_p:
+		op_p.visible = false
+	over_p.visible = false
+	pause_p.visible = false
+	hud.visible = false
+	if upd_p:
+		upd_p.visible = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	lobby_p.visible = true
+	lob_in.text = ""
+	refresh_lobby()
+	_refresh_chat()
+
+
+func hide_lobby() -> void:
+	if lobby_p:
+		lobby_p.visible = false
+	release_chat_focus()
+
+
+func refresh_lobby() -> void:
+	if lobby_p == null or not lobby_p.visible:
+		return
+	var net = game.net
+	lob_info.text = "%s  ·  %s\n%s" % [net.mode_title(), WB.MAPS[net.map_idx].name, net.MODES.get(net.gmode, net.MODES.ffa)[1]]
+	lob_code.visible = net.is_host
+	for c in lob_code.get_children():
+		if c.has_meta("copy"):
+			c.visible = net.invite_code != ""
+	if net.invite_code != "":
+		lob_code_l.text = "Código para invitar: %s" % net.invite_code
+	else:
+		lob_code_l.text = "Partida local: aparece sola en la lista de tu red"
+	for c in lob_list.get_children():
+		c.queue_free()
+	var ids: Array = net.players.keys()
+	ids.sort()
+	for id in ids:
+		var p: Dictionary = net.players[id]
+		var r := HBoxContainer.new()
+		r.add_theme_constant_override("separation", 8)
+		var mic := _mic_icon()
+		mic.set_meta("pid", id)
+		r.add_child(mic)
+		var sq := ColorRect.new()
+		sq.color = net.player_col(id)
+		sq.custom_minimum_size = Vector2(6, 22)
+		r.add_child(sq)
+		var tag := ""
+		if id == 1:
+			tag += "  (anfitrión)"
+		if id == net.my_id():
+			tag += "  (tú)"
+		var nl := _label(str(p.name) + tag, 18, net.player_col(id), 3)
+		nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		r.add_child(nl)
+		if net.gmode == "tdm":
+			var tm: int = net.team_of(id)
+			r.add_child(_label(net.TEAM_NAMES[tm], 16, net.TEAM_COLS[tm], 3))
+		lob_list.add_child(r)
+	lob_list.add_child(_label("%d / %d jugadores" % [ids.size(), net.MAX_PLAYERS], 14, Color(0.8, 0.82, 0.8), 3))
+	lob_start.visible = net.is_host
+	lob_start.text = "INICIAR PARTIDA (%d)" % ids.size()
+	lob_team.visible = net.gmode == "tdm"
+	if net.is_host:
+		lob_wait.text = "Cuando estéis todos, pulsa INICIAR PARTIDA. Quien entre después se une directamente."
+	else:
+		var hn: String = net.players[1].name if net.players.has(1) else "el anfitrión"
+		lob_wait.text = "Esperando a que %s inicie la partida..." % hn
+
+
+## Text for one chat line (BBCode, the player's text escaped).
+func _chat_bb(c: Dictionary) -> String:
+	var txt: String = str(c.text).replace("[", "[lb]")
+	if c.sys:
+		return "[color=#c8c8b4][i]%s[/i][/color]" % txt
+	return "[color=#%s][b]%s:[/b][/color] %s" % [(c.col as Color).to_html(false), str(c.name).replace("[", "[lb]"), txt]
+
+
+func _refresh_chat() -> void:
+	if lob_chat == null or lobby_p == null or not lobby_p.visible:
+		return
+	for c in lob_chat.get_children():
+		c.queue_free()
+	for c in game.net.chat_log.slice(maxi(0, game.net.chat_log.size() - 40)):
+		var rt := RichTextLabel.new()
+		rt.bbcode_enabled = true
+		rt.fit_content = true
+		rt.scroll_active = false
+		rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		rt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		rt.add_theme_font_size_override("normal_font_size", 16)
+		rt.add_theme_font_size_override("bold_font_size", 16)
+		rt.add_theme_font_size_override("italics_font_size", 15)
+		rt.text = _chat_bb(c)
+		lob_chat.add_child(rt)
+	# scroll to the newest line once the layout has the new height
+	get_tree().process_frame.connect(func():
+		lob_chat_scroll.scroll_vertical = int(lob_chat_scroll.get_v_scroll_bar().max_value)
+	, CONNECT_ONE_SHOT)
+
+
+func _build_chat() -> void:
+	chat_box = VBoxContainer.new()
+	chat_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	chat_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	chat_box.offset_left = 300
+	chat_box.offset_right = 800
+	chat_box.offset_top = -96
+	chat_box.offset_bottom = -96
+	chat_box.alignment = BoxContainer.ALIGNMENT_END
+	chat_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(chat_box)
+	var rt := RichTextLabel.new()
+	rt.bbcode_enabled = true
+	rt.fit_content = true
+	rt.scroll_active = false
+	rt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	rt.custom_minimum_size = Vector2(500, 0)
+	rt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rt.add_theme_font_size_override("normal_font_size", 17)
+	rt.add_theme_font_size_override("bold_font_size", 17)
+	rt.add_theme_font_size_override("italics_font_size", 16)
+	rt.add_theme_constant_override("outline_size", 4)
+	rt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0, 0, 0, 0.0)
+	bg.set_content_margin_all(6)
+	bg.set_corner_radius_all(6)
+	rt.add_theme_stylebox_override("normal", bg)
+	chat_box.add_child(rt)
+	chat_box.set_meta("rt", rt)
+	chat_box.set_meta("bg", bg)
+	chat_in = LineEdit.new()
+	chat_in.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	chat_in.offset_left = 300
+	chat_in.offset_right = 800
+	chat_in.offset_top = -90
+	chat_in.offset_bottom = -56
+	chat_in.max_length = 120
+	chat_in.placeholder_text = "Escribe y pulsa Intro  ·  Esc para cancelar"
+	chat_in.visible = false
+	chat_in.text_submitted.connect(func(txt: String):
+		game.net.send_chat(txt)
+		close_chat()
+	)
+	hud.add_child(chat_in)
+	coop_box = VBoxContainer.new()
+	coop_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	coop_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	coop_box.offset_left = 22
+	coop_box.offset_right = 282
+	coop_box.offset_top = -244
+	coop_box.offset_bottom = -244
+	coop_box.alignment = BoxContainer.ALIGNMENT_END
+	coop_box.add_theme_constant_override("separation", 4)
+	coop_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(coop_box)
+
+
+func open_chat() -> void:
+	if chat_in == null or not hud.visible:
+		return
+	chat_open = true
+	var p = game.player
+	if p and is_instance_valid(p):
+		p.mouse_down = false
+		p.aiming = false
+	chat_in.text = ""
+	chat_in.visible = true
+	chat_in.grab_focus()
+
+
+func close_chat() -> void:
+	chat_open = false
+	if chat_in:
+		chat_in.visible = false
+		chat_in.release_focus()
+
+
+func release_chat_focus() -> void:
+	close_chat()
+	if lob_in:
+		lob_in.release_focus()
+
+
+func _tick_mp(delta: float) -> void:
+	var net = game.net
+	# lobby mic icons
+	if lobby_p and lobby_p.visible:
+		lob_t -= delta
+		if lob_t <= 0.0:
+			lob_t = 0.1
+			for r in lob_list.get_children():
+				for c in r.get_children():
+					if c.has_meta("pid"):
+						var on: bool = net.voice.is_talking(int(c.get_meta("pid")))
+						if on != c.get_meta("on", false):
+							c.set_meta("on", on)
+							c.queue_redraw()
+	if chat_box == null:
+		return
+	chat_box.visible = net.active
+	if not net.active:
+		if chat_open:
+			close_chat()
+		coop_box.visible = false
+		return
+	# in-game chat: recent lines fade out after 10 s; everything recent while typing
+	var now := Time.get_ticks_msec() / 1000.0
+	var lines := []
+	for c in net.chat_log.slice(maxi(0, net.chat_log.size() - 8)):
+		if chat_open or now - float(c.t) < 10.0:
+			lines.append(_chat_bb(c))
+	if net.voice.talking:
+		lines.append("[color=#59ff73][i]Hablando...[/i][/color]")
+	var rt: RichTextLabel = chat_box.get_meta("rt")
+	var txt := "\n".join(lines)
+	if rt.text != txt:
+		rt.text = txt
+	(chat_box.get_meta("bg") as StyleBoxFlat).bg_color = Color(0, 0, 0, 0.45 if chat_open and txt != "" else 0.0)
+	# co-op zombies: players + points, bottom left
+	var show_coop: bool = net.is_coop() and net.started and game.zm != null
+	coop_box.visible = show_coop
+	if not show_coop:
+		return
+	coop_t -= delta
+	if coop_t > 0.0:
+		return
+	coop_t = 0.15
+	for c in coop_box.get_children():
+		c.queue_free()
+	var ids: Array = net.players.keys()
+	ids.sort()
+	for id in ids:
+		var me: bool = id == net.my_id()
+		var alive := true
+		if me:
+			alive = game.player != null and is_instance_valid(game.player) and game.player.alive
+		else:
+			alive = bool(net.alive_map.get(id, true))
+		var p_pts: int = int(game.zm.points) if me else int(net.pts.get(id, 500))
+		var col: Color = net.player_col(id)
+		var pc := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0, 0, 0, 0.5 if me else 0.35)
+		sb.set_corner_radius_all(4)
+		sb.content_margin_left = 6
+		sb.content_margin_right = 10
+		sb.content_margin_top = 2
+		sb.content_margin_bottom = 2
+		if me:
+			sb.border_color = Color(col, 0.7)
+			sb.set_border_width_all(1)
+		pc.add_theme_stylebox_override("panel", sb)
+		pc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var r := HBoxContainer.new()
+		r.add_theme_constant_override("separation", 7)
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		pc.add_child(r)
+		var bar := ColorRect.new()
+		bar.color = col if alive else Color(0.4, 0.4, 0.4)
+		bar.custom_minimum_size = Vector2(5, 22)
+		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.add_child(bar)
+		var mic := _mic_icon()
+		mic.set_meta("on", net.voice.is_talking(id))
+		r.add_child(mic)
+		var nm := str(net.players[id].name)
+		if not alive:
+			nm += "  (caído)"
+		var nl := _label(nm, 17, col if alive else Color(0.6, 0.6, 0.6), 3)
+		nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		nl.clip_text = true
+		r.add_child(nl)
+		var pl := _label(str(p_pts), 19, GOLD if alive else Color(0.6, 0.6, 0.6), 4)
+		pl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		r.add_child(pl)
+		coop_box.add_child(pc)

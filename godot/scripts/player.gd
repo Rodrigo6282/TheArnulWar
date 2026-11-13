@@ -205,7 +205,7 @@ func _store_homes(g: Dictionary) -> void:
 
 # ---------------------------------------------------------------- input
 func _unhandled_input(event: InputEvent) -> void:
-	if game.state != "playing":
+	if game.state != "playing" or game.ui.chat_open:
 		return
 	if not alive:
 		# co-op zombies: left click switches which teammate the camera follows
@@ -263,7 +263,7 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		_spectate(delta)
 		return
-	var in_ctrl: bool = game.state == "playing"
+	var in_ctrl: bool = game.state == "playing" and not game.ui.chat_open
 	# Space: climb/vault when facing a ledge or window (also while jumping at one), else jump
 	var space_now := Input.is_physical_key_pressed(KEY_SPACE) and in_ctrl
 	var space_hit := space_now and not space_was
@@ -322,7 +322,7 @@ func _physics_process(delta: float) -> void:
 			game.sfx.play("step%d" % (si + 1), vol, 0.06)
 	# lean (Q/E), blocked by walls at the side
 	var lt := float(Input.is_physical_key_pressed(KEY_E)) - float(Input.is_physical_key_pressed(KEY_Q))
-	if sprinting:
+	if sprinting or not in_ctrl:
 		lt = 0.0
 	if lt != 0.0:
 		var from := global_position + Vector3(0, eye_height(), 0)

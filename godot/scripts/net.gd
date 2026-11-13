@@ -40,6 +40,19 @@ var alive_map := {}      # id -> alive (from the state stream)
 var respawn_t := 0.0
 var ended := false
 var status := ""
+# lobby: everyone gathers first, the host presses INICIAR PARTIDA (late joiners go straight in)
+var started := false
+signal lobby_changed
+# text chat: [{name, text, col, t, sys}] (newest last)
+var chat_log := []
+signal chat_added
+# co-op zombies: points of every player (id -> points), streamed by each peer
+var pts := {}
+var pts_t := 0.0
+const VoiceScript := preload("res://scripts/voice.gd")
+var voice: Node
+const PLAYER_COLS := [Color(1.0, 1.0, 1.0), Color(0.35, 0.65, 1.0), Color(1.0, 0.82, 0.25), Color(0.4, 0.95, 0.45),
+	Color(1.0, 0.5, 0.3), Color(0.85, 0.5, 1.0), Color(0.4, 0.95, 0.95), Color(1.0, 0.55, 0.7)]
 const VSEP := ""
 
 # ---- LAN discovery: the host broadcasts a small UDP beacon every second; the MULTIJUGADOR
@@ -132,6 +145,10 @@ func _ready() -> void:
 	multiplayer.connection_failed.connect(_on_failed)
 	multiplayer.server_disconnected.connect(_on_server_lost)
 	_make_online()
+	voice = VoiceScript.new()
+	voice.name = "Voice"
+	voice.net = self
+	add_child(voice)
 
 
 func my_id() -> int:
@@ -254,9 +271,10 @@ func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa", onlin
 	znext_id = 1
 	players = {}
 	players[1] = _new_player(my_name, int(game.settings.get("op", 0)))
-	game.start_mp(map_idx)
+	started = false
+	_enter_lobby()
+	add_chat("", "Sala creada. Espera a tus amigos y pulsa INICIAR PARTIDA.", true)
 	if online_mode:
-		game.ui.notice("PARTIDA ONLINE", "Código para invitar: %s  ·  lo tienes en Tab y en el menú de pausa (con botón para copiarlo)" % invite_code, 7.0)
 		online_changed.emit()
 	return ""
 
@@ -286,7 +304,13 @@ func leave() -> void:
 	active = false
 	is_host = false
 	ended = false
+	started = false
 	team_kills = [0, 0]
+	chat_log.clear()
+	pts.clear()
+	alive_map.clear()
+	if voice:
+		voice.reset()
 	if online:
 		online.close()
 	online_mode = false
@@ -317,11 +341,17 @@ func _on_peer_connected(_id: int) -> void:
 
 func _on_peer_disconnected(id: int) -> void:
 	if players.has(id):
-		game.ui.feed_line("%s salió de la partida" % players[id].name, false)
+		if started:
+			game.ui.feed_line("%s salió de la partida" % players[id].name, false)
+		add_chat("", "%s se ha ido" % players[id].name, true)
 	players.erase(id)
+	pts.erase(id)
 	_remove_puppet(id)
+	if voice:
+		voice.drop(id)
 	if is_host:
 		rpc("sync_players", players)
+	lobby_changed.emit()
 
 
 # ---------------------------------------------------------------- lobby RPCs
@@ -343,13 +373,28 @@ func hello(player_name: String, op_i: int) -> void:
 				multiplayer.multiplayer_peer.disconnect_peer(id)
 		)
 		return
+	if players.size() >= MAX_PLAYERS:
+		get_tree().create_timer(0.5).timeout.connect(func():
+			if multiplayer.multiplayer_peer:
+				multiplayer.multiplayer_peer.disconnect_peer(id)
+		)
+		return
 	players[id] = _new_player(player_name, op_i)
-	rpc_id(id, "welcome", map_idx, gmode, team_kills, game.zm.snapshot_state() if game.zm else {})
+	if started:
+		rpc_id(id, "welcome", map_idx, gmode, team_kills, game.zm.snapshot_state() if game.zm else {})
+	else:
+		rpc_id(id, "zzzz_lobby", map_idx, gmode)
 	rpc("sync_players", players)
 	var tn := ""
 	if gmode == "tdm":
 		tn = " (equipo %s)" % TEAM_NAMES[players[id].team]
-	game.ui.feed_line("%s se unió a la partida%s" % [player_name, tn], true)
+	if started:
+		game.ui.feed_line("%s se unió a la partida%s" % [player_name, tn], true)
+	# everyone sees it in the chat (the newcomer gets the recent history too)
+	rpc("zzzz_sys", "%s se ha unido%s" % [player_name, tn])
+	for c in chat_log.slice(maxi(0, chat_log.size() - 12)):
+		if not c.sys:
+			rpc_id(id, "zzzz_chat_from", c.name, c.text, c.col)
 
 
 @rpc("authority", "reliable")
@@ -358,6 +403,8 @@ func welcome(map_i: int, mode_id: String, tk: Array, zstate: Dictionary) -> void
 	gmode = mode_id
 	team_kills = tk
 	ended = false
+	started = true
+	game.ui.hide_lobby()
 	game.start_mp(map_idx)
 	if game.zm and not zstate.is_empty():
 		game.zm.apply_state(zstate)
@@ -372,13 +419,21 @@ func sync_players(p: Dictionary) -> void:
 	for id in puppets.keys():
 		if not players.has(id):
 			_remove_puppet(id)
+	lobby_changed.emit()
 
 
 # ---------------------------------------------------------------- state streaming
 func update(delta: float) -> void:
-	if not active or game.player == null or not is_instance_valid(game.player):
+	if not active or not started or game.player == null or not is_instance_valid(game.player):
 		return
 	var pl = game.player
+	# co-op: everybody's points for the bottom-left list
+	if gmode == "zombies" and game.zm:
+		pts[my_id()] = int(game.zm.points)
+		pts_t -= delta
+		if pts_t <= 0.0:
+			pts_t = 0.5
+			rpc("zzzz_pts", int(game.zm.points))
 	send_t -= delta
 	if send_t <= 0.0:
 		send_t = 1.0 / SEND_HZ
@@ -907,3 +962,133 @@ func zzzz_barrel_gone(id: int) -> void:
 	for b in get_tree().get_nodes_in_group("xbarrel"):
 		if b.bid == id:
 			b.remove_quiet()
+
+
+# ---------------------------------------------------------------- lobby
+## Show the waiting room (map as the menu background).
+func _enter_lobby() -> void:
+	if game.state == "menu" and game.map_idx != map_idx:
+		game.load_map(map_idx)
+	game.ui.show_lobby()
+	lobby_changed.emit()
+
+
+## Host: everybody into the match.
+func start_match() -> void:
+	if not active or not is_host or started:
+		return
+	rpc("zzzz_start", map_idx, gmode)
+
+
+## Colour of a player (slot order = id order), used in the lobby, chat and co-op list.
+func player_col(id: int) -> Color:
+	var ids := players.keys()
+	ids.sort()
+	var i := ids.find(id)
+	return PLAYER_COLS[maxi(i, 0) % PLAYER_COLS.size()]
+
+
+@rpc("authority", "call_local", "reliable")
+func zzzz_start(map_i: int, mode_id: String) -> void:
+	map_idx = map_i
+	gmode = mode_id
+	started = true
+	ended = false
+	team_kills = [0, 0]
+	game.ui.hide_lobby()
+	game.start_mp(map_idx)
+	if is_host and online_mode:
+		game.ui.notice(mode_title(), "Código para invitar: %s  ·  Tab: marcador · Intro: chat · T: hablar" % invite_code, 6.0)
+	lobby_changed.emit()
+
+
+## Not started yet: the joiner waits in the lobby.
+@rpc("authority", "reliable")
+func zzzz_lobby(map_i: int, mode_id: String) -> void:
+	map_idx = map_i
+	gmode = mode_id
+	started = false
+	ended = false
+	status = ""
+	_enter_lobby()
+
+
+## Team deathmatch lobby: a player asks to change team.
+func switch_team() -> void:
+	if not active or started or gmode != "tdm":
+		return
+	if is_host:
+		_switch_team(1)
+	else:
+		rpc_id(1, "zzzz_team")
+
+
+@rpc("any_peer", "reliable")
+func zzzz_team() -> void:
+	if is_host and not started:
+		_switch_team(multiplayer.get_remote_sender_id())
+
+
+func _switch_team(id: int) -> void:
+	if players.has(id):
+		players[id].team = 1 - team_of(id)
+		rpc("sync_players", players)
+
+
+# ---------------------------------------------------------------- text chat
+func add_chat(pname: String, text: String, sys := false, col := Color.WHITE) -> void:
+	chat_log.append({"name": pname, "text": text, "col": col, "t": Time.get_ticks_msec() / 1000.0, "sys": sys})
+	if chat_log.size() > 60:
+		chat_log.pop_front()
+	chat_added.emit()
+
+
+func send_chat(text: String) -> void:
+	text = text.strip_edges().substr(0, 120)
+	if text == "" or not active:
+		return
+	rpc("zzzz_chat", text)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func zzzz_chat(text: String) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if id == 0:
+		id = my_id()
+	var pname: String = players[id].name if players.has(id) else "?"
+	var col := player_col(id)
+	if gmode == "tdm":
+		col = TEAM_COLS[team_of(id)]
+	add_chat(pname, text.substr(0, 120), false, col)
+	if id != my_id():
+		game.sfx.play("click", -10)
+
+
+## Chat history for someone who just joined (sent by the host).
+@rpc("authority", "reliable")
+func zzzz_chat_from(pname: String, text: String, col: Color) -> void:
+	add_chat(pname, text, false, col)
+
+
+@rpc("authority", "call_local", "reliable")
+func zzzz_sys(text: String) -> void:
+	add_chat("", text, true)
+
+
+# ---------------------------------------------------------------- co-op points
+@rpc("any_peer", "unreliable")
+func zzzz_pts(p: int) -> void:
+	pts[multiplayer.get_remote_sender_id()] = p
+
+
+# ---------------------------------------------------------------- voice chat (voice.gd)
+func voice_send(pkt: PackedByteArray) -> void:
+	if active and multiplayer.multiplayer_peer and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+		rpc("zzzz_voice", pkt)
+
+
+@rpc("any_peer", "unreliable_ordered")
+func zzzz_voice(pkt: PackedByteArray) -> void:
+	var id := multiplayer.get_remote_sender_id()
+	if players.has(id):
+		voice.receive(id, pkt)
