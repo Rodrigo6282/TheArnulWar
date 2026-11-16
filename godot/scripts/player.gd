@@ -74,7 +74,7 @@ var pump_t := 0.0
 var weapons := [
 	{"name": "AR-7 Fusil de asalto", "short": "Fusil", "auto": true, "rate": 0.095, "dmg": 30.0, "head": 2.0, "falloff": [35.0, 90.0, 0.75], "mag": 30, "reserve_max": 180, "reload": 2.0,
 		"spread": 0.016, "aim_spread": 0.003, "pellets": 1, "recoil": 0.011, "range": 220.0, "fov": 52.0, "snd": "rifle", "ammo": 30, "reserve": 180, "zmul": 1.6},
-	{"name": "M-12 Escopeta", "short": "Escopeta", "auto": false, "rate": 0.85, "dmg": 15.0, "head": 1.5, "mag": 6, "reserve_max": 36, "reload": 2.5,
+	{"name": "C-2 Recortada", "short": "Escopeta", "auto": false, "rate": 0.32, "dmg": 16.0, "head": 1.5, "mag": 2, "reserve_max": 30, "reload": 2.5,
 		"spread": 0.07, "aim_spread": 0.05, "pellets": 9, "recoil": 0.05, "range": 45.0, "fov": 65.0, "snd": "shotgun", "ammo": 6, "reserve": 36, "falloff": [8.0, 30.0, 0.25], "zmul": 1.7},
 	{"name": "P9 Pistola", "short": "Pistola", "auto": false, "rate": 0.16, "dmg": 34.0, "head": 2.2, "falloff": [15.0, 50.0, 0.6], "mag": 12, "reserve_max": 72, "reload": 1.3,
 		"spread": 0.014, "aim_spread": 0.004, "pellets": 1, "recoil": 0.022, "range": 120.0, "fov": 60.0, "snd": "pistol", "ammo": 12, "reserve": 72, "zmul": 1.5},
@@ -1334,8 +1334,9 @@ func _update_weapon(delta: float, hs: float) -> void:
 				if reload_empty:
 					var pm := sin(clampf((kk - 0.3) / 0.7, 0.0, 1.0) * PI)
 					hand = (a.port as Vector3).lerp(a.home, _sm(kk / 0.3))
-					hand.z += pm * 0.08
-					g.pump.position.z = g.pump_home.z + pm * 0.08
+					if g.has("pump"):
+						hand.z += pm * 0.08
+						g.pump.position.z = g.pump_home.z + pm * 0.08
 				else:
 					hand = (a.port as Vector3).lerp(a.home, _sm(kk))
 			rz -= 0.5 * env

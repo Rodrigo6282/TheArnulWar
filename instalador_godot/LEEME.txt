@@ -159,11 +159,15 @@ CRÉDITOS
 --------
 Motor: Godot Engine (licencia MIT, godotengine.org).
 Texturas y modelos 3D de objetos: Poly Haven (polyhaven.com), dominio público CC0.
-Pistola, francotirador y granada: modelos "Service Pistol", "Bolt Action Rifle 7.62" y
-  "Stick Grenade" de Poly Haven (polyhaven.com), dominio público CC0.
-Fusil de asalto, subfusil y ametralladora: "Ak trio pack" de mightydinosaurcol
-  (opengameart.org/node/156989), licencia CC-BY 3.0
-  (creativecommons.org/licenses/by/3.0). Se usan los modelos AK-47, AKS-74U y RPK
+Fusil de asalto, subfusil, pistola y francotirador: "Classic Weapons Pack" de Stein Games
+  (stein-indie.itch.io/classic-weapons-pack), dominio público CC0. Se usan el AK-47,
+  MP5, 1911 y M700 con sus texturas PBR; cargador, corredera y cerrojo se separaron
+  del modelo para las recargas.
+Escopeta recortada: "Shotgun" (doble cañón) de OpenGameArt (opengameart.org/node/96385),
+  dominio público CC0.
+Granada: "Stick Grenade" de Poly Haven (polyhaven.com), dominio público CC0.
+Ametralladora: "Ak trio pack" de mightydinosaurcol (opengameart.org/node/156989),
+  licencia CC-BY 3.0 (creativecommons.org/licenses/by/3.0). Se usa el modelo RPK
   con sus texturas; el cargador se separó del modelo para las recargas.
 Camioneta UAZ: modelo de ANDREO12 en Sketchfab (sketchfab.com/ANDREO12), repintado
   en el juego. Coche tapado con lona: "Covered Car" de Poly Haven, CC0.

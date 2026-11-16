@@ -28,6 +28,8 @@ var ch: Array = []
 var hitmark: Control
 var hitmark_t := 0.0
 var dmg_root: Control
+var nade_ind: NadeInd
+var nade_seen := {}       # grenade instance id -> true (warning beep played)
 var q_opt: OptionButton
 var d_opt: OptionButton
 var fs_chk: CheckButton
@@ -119,6 +121,42 @@ const MINI_RANGE := 34.0          # metres from the centre to the edge
 
 
 ## Medal badge drawn with vector shapes (no image assets needed).
+## Grenade warning: a grenade icon around the crosshair, in the direction of each live enemy
+## grenade near the player (up = in front), blinking faster and redder the closer it is.
+class NadeInd extends Control:
+	var items: Array = []    # [angle (rad, 0 = ahead, + = right), closeness 0..1, height diff]
+	var t := 0.0
+
+	func _draw() -> void:
+		for it in items:
+			var a: float = it[0]
+			var k: float = it[1]
+			var dir := Vector2(sin(a), -cos(a))
+			var c := Vector2.ZERO
+			draw_set_transform(dir * 150.0, 0.0, Vector2.ONE * 1.6)
+			var blink := 0.6 + 0.4 * sin(t * (8.0 + k * 14.0))
+			var col := Color(1.0, 0.85 - k * 0.6, 0.2 - k * 0.15, 0.55 + 0.45 * blink)
+			# dark backing disc
+			draw_circle(c, 23.0, Color(0, 0, 0, 0.45))
+			draw_arc(c, 23.0, 0.0, TAU, 32, col, 2.5, true)
+			# grenade: oval body with ribs, fuse head and spoon lever
+			var body := PackedVector2Array()
+			for i in 20:
+				var u := TAU * i / 20.0
+				body.append(c + Vector2(cos(u) * 8.5, sin(u) * 10.5 + 3.0))
+			draw_colored_polygon(body, col)
+			for ry in [-2.0, 3.0, 8.0]:
+				draw_line(c + Vector2(-8, ry), c + Vector2(8, ry), Color(0, 0, 0, 0.5), 1.2)
+			draw_rect(Rect2(c + Vector2(-3.5, -11.5), Vector2(7, 5)), col)
+			draw_line(c + Vector2(3.5, -10.5), c + Vector2(9.5, -3.0), col, 2.5)
+			draw_arc(c + Vector2(-6.5, -10.0), 3.0, 0.0, TAU, 12, col, 1.5)
+			# little pointer towards the grenade
+			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+			var tip := dir * 205.0
+			var side := Vector2(-dir.y, dir.x) * 7.0
+			draw_colored_polygon(PackedVector2Array([tip, tip - dir * 15.0 + side * 1.4, tip - dir * 15.0 - side * 1.4]), col)
+
+
 class Badge extends Control:
 	var col := Color.WHITE
 	var sym := "star"
@@ -365,7 +403,7 @@ func _build_menu() -> void:
 	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(ver)
 	# attribution required by the CC-BY models (full credits in LEEME.txt)
-	var cred := _label("Modelos 3D: Poly Haven (CC0) · Fusil, subfusil y ametralladora: \"Ak trio pack\" de mightydinosaurcol (CC-BY 3.0, OpenGameArt) · Camioneta UAZ: ANDREO12 (Sketchfab) · Personajes: Mixamo", 12, Color(0.7, 0.73, 0.71), 3)
+	var cred := _label("Modelos 3D: Poly Haven (CC0) · Fusil, subfusil, pistola y francotirador: \"Classic Weapons Pack\" de Stein Games (CC0) · Escopeta: OpenGameArt (CC0) · Ametralladora: \"Ak trio pack\" de mightydinosaurcol (CC-BY 3.0, OpenGameArt) · Camioneta UAZ: ANDREO12 (Sketchfab) · Personajes: Mixamo", 12, Color(0.7, 0.73, 0.71), 3)
 	cred.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(cred)
 	if game.updater:
@@ -531,6 +569,9 @@ func _build_hud() -> void:
 	dmg_root = Control.new()
 	dmg_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	center.add_child(dmg_root)
+	nade_ind = NadeInd.new()
+	nade_ind.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center.add_child(nade_ind)
 	wave_l = _label("", 22, Color.WHITE, 5)
 	wave_l.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	wave_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1335,7 +1376,41 @@ func nuke_flash() -> void:
 	nuke_rect.visible = true
 
 
+## Live enemy grenades within 9 m of the player -> warning icons (and one beep per grenade).
+func _tick_nades(delta: float) -> void:
+	if nade_ind == null:
+		return
+	nade_ind.items.clear()
+	nade_ind.t += delta
+	var p = game.player
+	if p != null and is_instance_valid(p) and p.alive and hud.visible:
+		var me: int = game.net.my_id() if game.net.active else -1
+		var pp: Vector3 = p.global_position
+		for g in get_tree().get_nodes_in_group("live_nade"):
+			if not is_instance_valid(g) or not (g is Node3D):
+				continue
+			var owner_id: int = int(g.get_meta("owner", 0))
+			if owner_id == me or (game.net.active and owner_id > 0 and game.net.is_ally(owner_id)):
+				continue
+			var gp: Vector3 = (g as Node3D).global_position
+			var d := gp - pp
+			var dist := Vector2(d.x, d.z).length()
+			if dist > 9.0:
+				continue
+			var rel: float = wrapf(atan2(-d.x, -d.z) - p.yaw, -PI, PI)
+			nade_ind.items.append([-rel, clampf(1.0 - (dist - 1.5) / 7.5, 0.0, 1.0), d.y])
+			var gid: int = (g as Node).get_instance_id()
+			if not nade_seen.has(gid):
+				nade_seen[gid] = true
+				game.sfx.play("click", 2.0, 0.0)
+				game.sfx.play("radar", -10.0, 0.0)
+		if nade_seen.size() > 64:
+			nade_seen.clear()
+	nade_ind.queue_redraw()
+
+
 func tick(delta: float) -> void:
+	_tick_nades(delta)
 	if nuke_rect and nuke_rect.visible:
 		nuke_a -= delta * 0.35
 		nuke_rect.modulate.a = clampf(nuke_a * 1.4, 0.0, 1.0)

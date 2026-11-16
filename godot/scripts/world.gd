@@ -485,6 +485,9 @@ static func extra_buildings(root: Node3D, i: int, n: int) -> void:
 			roofm = trim
 		2, 5:
 			walls = [pbr("concrete_block_wall", Color(0.78, 0.74, 0.68)), pbr("metal_plate", Color(0.62, 0.66, 0.7), 0.35, 0.6)]
+			if ResourceLoader.exists("res://assets/tex/rusty_painted_metal_diff.jpg"):
+				walls.append(pbr("rusty_painted_metal", Color(0.85, 0.88, 0.9), 0.4, 0.4))
+				walls.append(pbr("painted_metal_shutter", Color(0.85, 0.85, 0.85), 0.4, 0.4))
 			trim = pbr("concrete_floor_01", Color(0.62, 0.64, 0.68), 0.3)
 			roofm = pbr("corrugated_iron_02", Color(0.55, 0.57, 0.58), 0.38, 0.45)
 		6:
@@ -496,12 +499,21 @@ static func extra_buildings(root: Node3D, i: int, n: int) -> void:
 			walls = [pbr("brick_wall_001"), pbr("white_stucco", Color(0.8, 0.76, 0.7), 0.4)]
 			trim = pbr("chipped_concrete", Color(0.6, 0.6, 0.6), 0.33)
 			roofm = pbr("concrete_floor_01", Color(0.5, 0.5, 0.5), 0.5)
+			if ResourceLoader.exists("res://assets/tex/grey_roof_tiles_diff.jpg"):
+				walls.append(pbr("peeling_painted_wall", Color(0.85, 0.82, 0.78), 0.4))
+				roofm = pbr("grey_roof_tiles", Color(0.85, 0.85, 0.85), 0.5)
 		4:
 			walls = [pbr("concrete_block_wall", Color(0.7, 0.7, 0.72)), pbr("corrugated_iron_02", Color(0.45, 0.5, 0.42), 0.38, 0.45)]
+			if ResourceLoader.exists("res://assets/tex/rusty_corrugated_iron_diff.jpg"):
+				walls.append(pbr("rusty_corrugated_iron", Color(0.9, 0.88, 0.85), 0.4, 0.4))
+				walls.append(pbr("box_profile_metal_sheet", Color(0.8, 0.82, 0.8), 0.4, 0.5))
 			trim = pbr("chipped_concrete", Color(0.55, 0.56, 0.58), 0.33)
 			roofm = pbr("corrugated_iron_02", Color(0.5, 0.5, 0.5), 0.38, 0.45)
 		_:
 			walls = [pbr("concrete_block_wall", Color(0.92, 0.9, 0.86)), pbr("brick_wall_001")]
+			if ResourceLoader.exists("res://assets/tex/painted_worn_brick_diff.jpg"):
+				walls.append(pbr("painted_worn_brick", Color(0.95, 0.93, 0.9), 0.45))
+				walls.append(pbr("peeling_painted_wall", Color(0.9, 0.9, 0.88), 0.4))
 			trim = pbr("chipped_concrete", Color(0.68, 0.7, 0.72), 0.33)
 			roofm = pbr("concrete_floor_01", Color(0.55, 0.55, 0.56), 0.5)
 	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
@@ -1288,6 +1300,7 @@ static func build(i: int, root: Node3D, names := {}) -> Array:
 	if not ("--nodress" in OS.get_cmdline_user_args() or "--noamb" in OS.get_cmdline_user_args()):
 		ambience(root, i)
 		extra_props(root, i)
+		scan_props(root, i)
 	contact_shadows(root)
 	_flush_windows(root)
 	if "--buildinfo" in OS.get_cmdline_user_args() and zlayout.has("perks"):
@@ -3466,6 +3479,57 @@ static func ambience(root: Node3D, i: int) -> void:
 			litter(root, 40, [Color(0.85, 0.83, 0.78)], 420, false)
 			for q in [[-26, -26], [26, -26], [-26, 26], [26, 26]]:
 				grass_tufts(root, Vector3(q[0], 0, q[1]), Vector2(11, 10), 140, Color(0.5, 0.55, 0.42))
+
+
+## Poly Haven scanned props downloaded for 1.8.2 (CC0), picked per map so they fit its look:
+## [model id, count, clearance radius, solid (collider), scale min, scale max]. Small things (gas
+## masks, medical boxes, toolboxes) have no collider and just sit on the ground.
+const SCAN_PLAN := {
+	0: [["wooden_crate_01", 4, 1.0, true, 1.0, 1.0], ["wooden_crate_02", 3, 1.0, true, 1.0, 1.0], ["concrete_road_barrier", 4, 1.4, true, 1.0, 1.0],
+		["utility_box_02", 3, 0.8, true, 1.0, 1.0], ["rusted_wheel_rim_01", 4, 0.6, false, 1.0, 1.0], ["tool_cart", 2, 1.0, true, 1.0, 1.0],
+		["modular_chainlink_fence", 2, 2.2, true, 1.0, 1.0], ["plastic_jerrycan", 4, 0.5, false, 1.0, 1.0], ["metal_toolbox", 3, 0.5, false, 1.0, 1.0],
+		["water_manhole_cover", 5, 0.8, false, 1.0, 1.0], ["street_lamp_01", 3, 0.8, true, 1.0, 1.0], ["wooden_military_crate", 3, 1.0, true, 1.0, 1.0]],
+	1: [["wooden_barrels_01", 3, 1.4, true, 1.0, 1.0], ["wooden_crate_01", 4, 1.0, true, 1.0, 1.0], ["wooden_crate_02", 3, 1.0, true, 1.0, 1.0],
+		["quiver_tree_01", 4, 1.6, true, 0.8, 1.1], ["namaqualand_boulder_02", 4, 1.6, true, 0.6, 1.0], ["shrub_01", 8, 0.8, false, 0.8, 1.2],
+		["barrel_stove", 2, 0.8, true, 1.0, 1.0], ["wooden_picnic_table", 2, 1.6, true, 1.0, 1.0], ["Lantern_01", 4, 0.5, false, 1.0, 1.0],
+		["plastic_jerrycan", 3, 0.5, false, 1.0, 1.0]],
+	2: [["wooden_crate_01", 4, 1.0, true, 1.0, 1.0], ["wooden_military_crate", 5, 1.0, true, 1.0, 1.0], ["barrel_stove", 3, 0.8, true, 1.0, 1.0],
+		["small_lpg_tank", 3, 0.8, true, 1.0, 1.0], ["portable_searchlight", 3, 0.8, true, 1.0, 1.0], ["old_military_compressor", 2, 1.2, true, 1.0, 1.0],
+		["tool_cart", 2, 1.0, true, 1.0, 1.0], ["plastic_jerrycan", 4, 0.5, false, 1.0, 1.0], ["modular_chainlink_fence", 2, 2.2, true, 1.0, 1.0],
+		["metal_toolbox", 3, 0.5, false, 1.0, 1.0]],
+	3: [["wooden_barrels_01", 2, 1.4, true, 1.0, 1.0], ["wooden_picnic_table", 2, 1.6, true, 1.0, 1.0], ["tree_stump_01", 4, 0.8, true, 0.8, 1.2],
+		["dead_tree_trunk_02", 2, 1.6, true, 0.8, 1.0], ["Lantern_01", 4, 0.5, false, 1.0, 1.0], ["shrub_01", 8, 0.8, false, 0.8, 1.2],
+		["rusted_wheel_rim_01", 3, 0.6, false, 1.0, 1.0], ["wooden_crate_02", 3, 1.0, true, 1.0, 1.0], ["barrel_stove", 2, 0.8, true, 1.0, 1.0]],
+	4: [["steel_frame_shelves_01", 4, 1.2, true, 1.0, 1.0], ["tool_cart", 3, 1.0, true, 1.0, 1.0], ["old_military_compressor", 2, 1.2, true, 1.0, 1.0],
+		["small_lpg_tank", 3, 0.8, true, 1.0, 1.0], ["barrel_stove", 3, 0.8, true, 1.0, 1.0], ["metal_toolbox", 4, 0.5, false, 1.0, 1.0],
+		["wooden_crate_02", 3, 1.0, true, 1.0, 1.0], ["plastic_jerrycan", 3, 0.5, false, 1.0, 1.0], ["rusted_wheel_rim_01", 3, 0.6, false, 1.0, 1.0],
+		["old_gas_mask", 3, 0.4, false, 1.0, 1.0]],
+	5: [["wooden_military_crate", 5, 1.0, true, 1.0, 1.0], ["portable_searchlight", 3, 0.8, true, 1.0, 1.0], ["old_military_compressor", 2, 1.2, true, 1.0, 1.0],
+		["small_lpg_tank", 3, 0.8, true, 1.0, 1.0], ["barrel_stove", 3, 0.8, true, 1.0, 1.0], ["medical_box", 4, 0.4, false, 1.0, 1.0],
+		["old_gas_mask", 3, 0.4, false, 1.0, 1.0], ["plastic_jerrycan", 3, 0.5, false, 1.0, 1.0]],
+	6: [["Lantern_01", 6, 0.5, false, 1.0, 1.0], ["dead_tree_trunk_02", 3, 1.6, true, 0.8, 1.0], ["tree_stump_01", 4, 0.8, true, 0.8, 1.2],
+		["shrub_01", 8, 0.8, false, 0.8, 1.2], ["namaqualand_boulder_02", 3, 1.6, true, 0.5, 0.8], ["wooden_ladder", 1, 1.4, false, 1.0, 1.0]],
+}
+
+
+static func scan_props(root: Node3D, i: int) -> void:
+	if "--noprops" in OS.get_cmdline_user_args():
+		return
+	for e in SCAN_PLAN.get(i, []):
+		var id: String = e[0]
+		if not has_model(id):
+			continue
+		var solid: bool = e[3]
+		_amb_scatter(i, int(e[1]), float(e[2]) + AMB_GAP * 0.5, solid, func(x: float, z: float) -> void:
+			var sc := rng.randf_range(float(e[4]), float(e[5]))
+			var rot := rng.randf() * TAU
+			if id == "wooden_ladder":
+				# lying in the grass
+				prop(root, id, x, z, rot, sc, 0.05, false, Vector3(PI / 2, 0, 0))
+			else:
+				prop(root, id, x, z, rot, sc, 0.0, solid)
+			if not solid:
+				reserve(x, z, float(e[2]) * 0.6))
 
 
 ## More props on every map (after ambience, same free-ground rules): cover-sized junk and debris.

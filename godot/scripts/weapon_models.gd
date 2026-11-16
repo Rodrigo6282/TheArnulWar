@@ -452,6 +452,8 @@ static func rifle() -> Dictionary:
 	part(g, Vector3(0.016, 0.008, 0.035), black, Vector3(0, -0.06, 0.24), Vector3.ZERO, 0.002)
 	cyl(g, 0.0135, 0.003, black, Vector3(0, 0.01, -0.741))
 	# hands
+	if stein_on("rifle"):
+		return _stein_scan("rifle", g, mag)
 	if ak_on("rifle"):
 		return _ak_scan("rifle", g, mag)
 	right_grip(g, Vector3(0, -0.095, 0.075), Basis(Vector3.RIGHT, -0.3) * Vector3.UP, 0.025,
@@ -523,6 +525,8 @@ static func shotgun() -> Dictionary:
 	sb.height = 0.055
 	_mi(shell, sb, wm(Color(0.66, 0.15, 0.11), 0.5), Vector3.ZERO, Vector3(PI / 2, 0, 0))
 	sling(g, Vector3(0, -0.11, 0.3), Vector3(0, -0.04, -0.6), 0.15)
+	if db_on():
+		return _db_scan(g)
 	return {"model": g, "hip": Vector3(0.14, -0.17, -0.48), "aim": Vector3(0, -0.05, -0.3), "flash": flash(g, Vector3(0, 0.025, -0.73), 0.46),
 		"left": left, "pump": pump, "shell": shell, "kind": "shell"}
 
@@ -568,7 +572,17 @@ static func pistol() -> Dictionary:
 		part(g, Vector3(0.003, 0.07, 0.036), wm(Color(0.09, 0.09, 0.09), 0.85, 0.0, 0.0, "rubber"), Vector3(0.019 * sx, -0.095, 0.012), Vector3(-0.2, 0, 0), 0.001)
 	# scanned model (Poly Haven "service_pistol", CC0) replaces the primitives; the slide / mag
 	# nodes, grip points and flash stay, so reloads, recoil and the IK hands work unchanged
-	var scan := scan_pistol_on()
+	var stein := stein_on("pistol")
+	var scan := scan_pistol_on() and not stein
+	var st_base := Transform3D()
+	if stein:
+		for c in g.get_children():
+			if c != slide and c != mag:
+				c.free()
+		for c in slide.get_children() + mag.get_children():
+			c.free()
+		mag.rotation = Vector3.ZERO
+		st_base = _st_mount("pistol", g, {"mag": mag, "slide": slide})
 	if scan:
 		for c in g.get_children():
 			if c != slide and c != mag:
@@ -593,6 +607,11 @@ static func pistol() -> Dictionary:
 	var lpc := palm(left, lc + ga * -0.02, ga, Vector3.RIGHT, 0.038, 3.55, Vector3(0.028, 0.085, 0.07))
 	finger_path(left, [arc_pt(lc + ga * 0.03, ga, Vector3.RIGHT, 0.036, 3.35), Vector3(-0.026, -0.022, -0.035) - left.position, Vector3(-0.024, -0.024, -0.07) - left.position], 0.011)
 	forearm(left, lpc, lpc + Vector3(-0.02, -0.04, 0.045), Vector3(-0.3, -0.5, 1.0), true)
+	if stein:
+		var bones: Dictionary = g.get_meta("st_bones")
+		var sy: float = float(ST_CFG.pistol.sight) + st_base.origin.y
+		return {"model": g, "hip": Vector3(0.12, -0.13, -0.52), "aim": Vector3(0, -sy, -0.5), "flash": flash(g, st_base * (bones.get("FX_FIRE", Vector3(0, 0.072, 0.18)) as Vector3), 0.22),
+			"left": left, "mag": mag, "slide": slide, "kind": "pistol"}
 	if scan:
 		# the scanned pistol sits ~3 cm lower (its sights are at y≈0): lift the aim / hip poses
 		return {"model": g, "hip": Vector3(0.12, -0.13, -0.52), "aim": Vector3(0, -0.012, -0.5), "flash": flash(g, Vector3(0, -0.018, -0.175), 0.22),
@@ -827,6 +846,265 @@ static func _ak_scan(which: String, g: Node3D, mag: Node3D) -> Dictionary:
 		"left": left, "mag": mag, "handle": handle, "kind": "mag"}
 
 
+# ---- "Classic Weapons Pack" by Stein Games (itch.io, CC0): AK-47 → rifle, MP5 → smg, 1911 →
+# pistol, M700 → sniper. Unreal-style skinned FBX (scene space after import: +Y up, +Z towards the
+# muzzle, metres), PBR 2K textures (albedo, DirectX normal, RMAO). The skinned meshes are baked to
+# static meshes and split by the dominant bone of each vertex: the magazine / slide / bolt bones ride
+# on the gun's movable nodes, so the reload choreography moves the real parts. Each gun is lined up
+# on the procedural grip point gc (where the right hand is). grip / left / sight are measured in
+# scene space from side photos (herramientas/foto_arma.gd).
+const ST_DIR := "res://assets/models/stein/"
+const ST_CFG := {
+	"rifle": {"dir": "AK47", "grip": Vector3(0, -0.012, -0.004), "gc": Vector3(0, -0.095, 0.075), "gr": 0.025, "ga": -0.3,
+		"left": Vector3(0, 0.07, 0.33), "lr": 0.027, "sight": 0.146, "aim_z": -0.31, "hip": Vector3(0.14, -0.15, -0.46), "fs": 0.32,
+		"mag": ["MAGAZINE", "MAGAZINE_EXTRA"], "handle": ["SLIDE"]},
+	"smg": {"dir": "MP5", "grip": Vector3(0, -0.035, 0.0), "gc": Vector3(0, -0.085, 0.06), "gr": 0.024, "ga": -0.3,
+		"left": Vector3(0, 0.115, 0.27), "lr": 0.027, "sight": 0.174, "aim_z": -0.26, "hip": Vector3(0.13, -0.15, -0.42), "fs": 0.28,
+		"mag": ["MAGASINE"], "handle": ["BOLT_02"]},
+	"sniper": {"dir": "M700", "grip": Vector3(0, -0.04, -0.035), "gc": Vector3(0, -0.075, 0.085), "gr": 0.023, "ga": -0.55,
+		"left": Vector3(0, 0.0, 0.34), "lr": 0.03, "sight": 0.115, "aim_z": -0.2, "hip": Vector3(0.14, -0.17, -0.5), "fs": 0.4,
+		"mag": ["MAGAZINE", "BULLET_01", "BULLET_02"], "handle": ["BOLT"], "scope": true},
+	"pistol": {"dir": "1911", "grip": Vector3(0, -0.035, -0.002), "gc": Vector3(0, -0.09, 0.01), "sight": 0.088,
+		"mag": ["MAGAZINE"], "slide": ["SLIDE"]},
+}
+static var _st_mats := {}
+static var _st_bake := {}
+
+
+static func stein_on(which: String) -> bool:
+	return ST_CFG.has(which) and scan_on(ST_DIR + ST_CFG[which].dir + "/SKM_" + ST_CFG[which].dir + ".fbx")
+
+
+static func _st_mat(dir: String, mat_name: String) -> ShaderMaterial:
+	var key := dir + "|" + mat_name
+	if _st_mats.has(key):
+		return _st_mats[key]
+	var m := ShaderMaterial.new()
+	m.shader = SHT
+	if "BULLET" in mat_name.to_upper():
+		# rounds: plain brass (the pack doesn't ship their texture)
+		m.set_shader_parameter("use_arm", 0.0)
+		m.set_shader_parameter("base_col", Color(0.78, 0.6, 0.3))
+		m.set_shader_parameter("rough_mul", 0.35)
+	elif "GLOW" in mat_name.to_upper():
+		m.set_shader_parameter("use_arm", 0.0)
+		m.set_shader_parameter("base_col", Color(0.3, 1.0, 0.4))
+		m.set_shader_parameter("emission", Color(0.3, 1.0, 0.4))
+		m.set_shader_parameter("emission_energy", 3.0)
+	else:
+		var base := ST_DIR + dir + "/T_" + dir + "_"
+		m.set_shader_parameter("tex_alb", load(base + "C.png"))
+		var nor := base + "N.png"
+		if not ResourceLoader.exists(nor):
+			nor = ST_DIR + dir + "/T_1991_N.png"   # the 1911 normal map is misnamed in the pack
+		m.set_shader_parameter("tex_nor", load(nor))
+		m.set_shader_parameter("tex_arm", load(base + "RMAO.png"))
+		m.set_shader_parameter("use_arm", 1.0)
+		m.set_shader_parameter("rmao", 1.0)
+		m.set_shader_parameter("nor_dx", 1.0)
+	_st_mats[key] = m
+	return m
+
+
+## Bake the skinned FBX into static meshes per bone group. groups: {bone name: group key};
+## returns [[ArrayMesh, Material, group key, Transform3D (mesh -> scene)], ...] plus bones.
+static func _st_bake_gun(dir: String, groups: Dictionary) -> Dictionary:
+	var key := dir + str(groups)
+	if _st_bake.has(key):
+		return _st_bake[key]
+	var sc: Node = (load(ST_DIR + dir + "/SKM_" + dir + ".fbx") as PackedScene).instantiate()
+	var out := []
+	var bones := {}
+	var sk: Skeleton3D = null
+	for n in sc.find_children("*", "Skeleton3D", true, false):
+		sk = n
+	if sk != null:
+		var sxf := sk.transform
+		var pp := sk.get_parent()
+		while pp != null and pp != sc and pp is Node3D:
+			sxf = (pp as Node3D).transform * sxf
+			pp = pp.get_parent()
+		for b in sk.get_bone_count():
+			bones[sk.get_bone_name(b)] = (sxf * sk.get_bone_global_rest(b)).origin
+	for mi in sc.find_children("*", "MeshInstance3D", true, false):
+		var m3 := mi as MeshInstance3D
+		var xf := m3.transform
+		var p := m3.get_parent()
+		while p != null and p != sc and p is Node3D:
+			xf = (p as Node3D).transform * xf
+			p = p.get_parent()
+		var skin: Skin = m3.skin
+		var mesh: Mesh = m3.mesh
+		for si in mesh.get_surface_count():
+			var arr: Array = mesh.surface_get_arrays(si)
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var nv := verts.size()
+			var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array(range(nv))
+			var vg := PackedStringArray()
+			vg.resize(nv)
+			var bw = arr[Mesh.ARRAY_BONES]
+			if bw != null and skin != null and (bw as PackedInt32Array).size() > 0:
+				var bi: PackedInt32Array = bw
+				var ww: PackedFloat32Array = arr[Mesh.ARRAY_WEIGHTS]
+				var per := bi.size() / nv
+				for v in nv:
+					var best := 0
+					var bv := -1.0
+					for k in per:
+						if ww[v * per + k] > bv:
+							bv = ww[v * per + k]
+							best = bi[v * per + k]
+					var bn: String = skin.get_bind_name(best) if best < skin.get_bind_count() else ""
+					if bn == "" and best < skin.get_bind_count() and skin.get_bind_bone(best) >= 0 and sk != null:
+						bn = sk.get_bone_name(skin.get_bind_bone(best))
+					vg[v] = str(groups.get(bn, ""))
+			var by := {}
+			for t in range(0, idx.size(), 3):
+				var gk: String = vg[idx[t]]
+				if not by.has(gk):
+					by[gk] = PackedInt32Array()
+				var ia: PackedInt32Array = by[gk]
+				ia.append(idx[t])
+				ia.append(idx[t + 1])
+				ia.append(idx[t + 2])
+				by[gk] = ia
+			var sm: Material = m3.get_surface_override_material(si) if m3.get_surface_override_material(si) else mesh.surface_get_material(si)
+			var mname: String = sm.resource_name if sm else "gun"
+			for gk in by:
+				var a2 := arr.duplicate()
+				a2[Mesh.ARRAY_INDEX] = by[gk]
+				a2[Mesh.ARRAY_BONES] = null
+				a2[Mesh.ARRAY_WEIGHTS] = null
+				var am := ArrayMesh.new()
+				am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a2)
+				out.append([am, _st_mat(dir, mname), gk, xf])
+	sc.free()
+	var res := {"parts": out, "bones": bones}
+	_st_bake[key] = res
+	return res
+
+
+## Mount a Stein gun on g. nodes: {group key: node} for the movable parts (mag / slide / handle).
+static func _st_mount(which: String, g: Node3D, nodes: Dictionary) -> Transform3D:
+	var cf: Dictionary = ST_CFG[which]
+	var groups := {}
+	for k in ["mag", "slide", "handle"]:
+		for bn in cf.get(k, []):
+			groups[bn] = k
+	var bk: Dictionary = _st_bake_gun(cf.dir, groups)
+	var R := Basis(Vector3.UP, PI)
+	var base := Transform3D(R, (cf.gc as Vector3) - R * (cf.grip as Vector3))
+	# movable nodes pivot where their bone is
+	for k in nodes:
+		var bl: Array = cf.get(k, [])
+		if not bl.is_empty() and bk.bones.has(bl[0]):
+			(nodes[k] as Node3D).position = base * (bk.bones[bl[0]] as Vector3)
+			(nodes[k] as Node3D).rotation = Vector3.ZERO
+	for pt in bk.parts:
+		var dst: Node3D = nodes.get(pt[2], g)
+		var mi := MeshInstance3D.new()
+		mi.mesh = pt[0]
+		mi.material_override = pt[1]
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.transform = (base * pt[3]) if dst == g else dst.transform.affine_inverse() * base * pt[3]
+		mi.set_meta("scan", true)
+		dst.add_child(mi)
+	g.set_meta("st_bones", bk.bones)
+	return base
+
+
+## Long guns (rifle / smg / sniper) from the pack, with the hands and choreography points.
+static func _stein_scan(which: String, g: Node3D, mag: Node3D) -> Dictionary:
+	var cf: Dictionary = ST_CFG[which]
+	_clear_proc(g, [mag])
+	var handle := Node3D.new()
+	g.add_child(handle)
+	var base := _st_mount(which, g, {"mag": mag, "handle": handle})
+	var bones: Dictionary = g.get_meta("st_bones")
+	var gc: Vector3 = cf.gc
+	right_grip(g, gc, Basis(Vector3.RIGHT, float(cf.ga)) * Vector3.UP, cf.gr, trig_pts(gc), Vector3(0.18, -0.42, 1.0))
+	var left := Node3D.new()
+	left.position = base * (cf.left as Vector3)
+	g.add_child(left)
+	left_guard(left, Vector3.ZERO, cf.lr, Vector3(-0.32, -0.45, 1.0))
+	var fx: Vector3 = base * (bones.get("FX_FIRE", Vector3(0, 0.09, 0.7)) as Vector3)
+	if cf.get("scope", false):
+		_scope(g, base * (bones.get("ATTACH_SCOPE", Vector3(0, 0.05, 0.14)) as Vector3))
+	var sight_y: float = float(cf.sight) + base.origin.y
+	var d := {"model": g, "hip": cf.hip, "aim": Vector3(0, -sight_y, cf.aim_z), "flash": flash(g, fx, cf.fs),
+		"left": left, "mag": mag, "handle": handle, "kind": "mag"}
+	if which == "sniper":
+		d["bolt"] = true
+	return d
+
+
+## Rifle scope on a mount point (gun space): rings, tube, objective bell, eyepiece, turrets, lens.
+static func _scope(g: Node3D, at: Vector3) -> void:
+	var black := m_black()
+	var dark := m_dark()
+	var c := at + Vector3(0, 0.038, 0)
+	for z in [-0.06, 0.05]:
+		part(g, Vector3(0.03, 0.04, 0.018), dark, at + Vector3(0, 0.016, z), Vector3.ZERO, 0.005)
+	cyl(g, 0.016, 0.3, black, c)
+	cyl(g, 0.026, 0.07, black, c + Vector3(0, 0, -0.18))
+	cyl(g, 0.021, 0.06, black, c + Vector3(0, 0, 0.17))
+	cyl(g, 0.011, 0.022, dark, c + Vector3(0, 0.02, 0)).rotation = Vector3.ZERO
+	cyl(g, 0.011, 0.02, dark, c + Vector3(0.022, 0, 0)).rotation = Vector3(0, 0, PI / 2)
+	cyl(g, 0.023, 0.003, wm(Color(0.15, 0.3, 0.45), 0.03, 0.9, 0.6), c + Vector3(0, 0, -0.216))
+
+
+# ---- double-barrel sawed-off ("Shotgun" on OpenGameArt, CC0): OBJ in its own units (scale 0.19),
+# muzzle +X. Two shells, no pump.
+const DB_OBJ := "res://assets/models/double_barrel/doubleBarrel.obj"
+
+
+static func db_on() -> bool:
+	return scan_on(DB_OBJ)
+
+
+static func _db_scan(g: Node3D) -> Dictionary:
+	_clear_proc(g, [])
+	var s := 0.19
+	var R := Basis(Vector3.UP, PI / 2).scaled(Vector3.ONE * s)
+	var gc := Vector3(0, -0.09, 0.1)
+	var grip := Vector3(-1.6, -0.13, 0.0)
+	var base := Transform3D(R, gc - R * grip)
+	var mesh: Resource = load(DB_OBJ)
+	var m := ShaderMaterial.new()
+	m.shader = SHT
+	m.set_shader_parameter("use_arm", 0.0)
+	m.set_shader_parameter("tex_alb", load("res://assets/models/double_barrel/doubleBarrelD.png"))
+	m.set_shader_parameter("tex_rough", load("res://assets/models/double_barrel/doubleBarrelR.png"))
+	m.set_shader_parameter("tex_spec", load("res://assets/models/double_barrel/doubleBarrelG.png"))
+	if mesh is Mesh:
+		for sf in _surfaces(mesh):
+			var mi := MeshInstance3D.new()
+			mi.mesh = sf[0]
+			mi.material_override = m
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.transform = base
+			mi.set_meta("scan", true)
+			g.add_child(mi)
+	right_grip(g, gc, Basis(Vector3.RIGHT, -0.45) * Vector3.UP, 0.024,
+		[Vector3(0.017, -0.03, 0.05), Vector3(0.016, -0.034, 0.032), Vector3(0.012, -0.04, 0.022)], Vector3(0.18, -0.42, 1.0))
+	var left := Node3D.new()
+	left.position = base * Vector3(0.75, -0.08, 0.0)
+	g.add_child(left)
+	left_guard(left, Vector3.ZERO, 0.03, Vector3(-0.32, -0.45, 1.0))
+	var shell := Node3D.new()
+	shell.position = Vector3(0.03, 0.02, -0.02)
+	shell.visible = false
+	left.add_child(shell)
+	var sb := CylinderMesh.new()
+	sb.top_radius = 0.011
+	sb.bottom_radius = 0.011
+	sb.height = 0.055
+	_mi(shell, sb, wm(Color(0.66, 0.15, 0.11), 0.5), Vector3.ZERO, Vector3(PI / 2, 0, 0))
+	var sight_y: float = (base * Vector3(0, 0.36, 0)).y
+	return {"model": g, "hip": Vector3(0.14, -0.15, -0.46), "aim": Vector3(0, -sight_y - 0.012, -0.47), "flash": flash(g, base * Vector3(1.85, 0.28, 0.0), 0.46),
+		"left": left, "shell": shell, "kind": "shell"}
+
+
 ## Gun-root children that are procedural geometry (everything except the listed movable nodes).
 static func _clear_proc(g: Node3D, keep: Array) -> void:
 	for c in g.get_children():
@@ -898,6 +1176,8 @@ static func smg() -> Dictionary:
 	pins(g, [Vector3(0.03, -0.02, -0.15), Vector3(-0.03, -0.02, -0.15), Vector3(0.03, -0.02, 0.04), Vector3(-0.03, -0.02, 0.04)], 0.004, steel)
 	part(g, Vector3(0.004, 0.022, 0.03), steel, Vector3(-0.031, -0.01, 0.085), Vector3.ZERO, 0.002)
 	flashlight(g, Vector3(0, -0.044, -0.27))
+	if stein_on("smg"):
+		return _stein_scan("smg", g, mag)
 	if ak_on("smg"):
 		return _ak_scan("smg", g, mag)
 	right_grip(g, Vector3(0, -0.085, 0.06), Basis(Vector3.RIGHT, -0.3) * Vector3.UP, 0.024, trig_pts(Vector3(0, -0.085, 0.06)), Vector3(0.18, -0.42, 1.0))
@@ -971,6 +1251,8 @@ static func sniper() -> Dictionary:
 	ring(g, 0.009, 0.002, steel, Vector3(0, -0.06, -0.42)).rotation = Vector3(0, PI / 2, 0)
 	ring(g, 0.009, 0.002, steel, Vector3(0, -0.11, 0.33)).rotation = Vector3(0, PI / 2, 0)
 	rail(g, Vector3(0, 0.044, -0.05), 0.2, dark, black)
+	if stein_on("sniper"):
+		return _stein_scan("sniper", g, mag)
 	if scan_on(RIFLE_GLTF):
 		return _sniper_scan(g, handle, mag)
 	var gc := Vector3(0, -0.075, 0.085)

@@ -2229,6 +2229,20 @@ func _shot(kind: String, out: String) -> void:
 				player.fire_cd = 0.0
 				player.fire()
 				await get_tree().create_timer(0.09).timeout
+		if kind == "nadeind":
+			# enemy grenades landing around the player: one front-right, one behind-left
+			player.god = true
+			var fw: Vector3 = -player.camera.global_transform.basis.z
+			fw.y = 0.0
+			fw = fw.normalized()
+			var rt := Vector3(-fw.z, 0, fw.x)
+			for off in [fw * 3.0 + rt * 2.5, -fw * 5.0 - rt * 2.0]:
+				var g := Node3D.new()
+				add_child(g)
+				g.global_position = player.global_position + off
+				g.add_to_group("live_nade")
+				g.set_meta("owner", 0)
+			await get_tree().create_timer(0.4).timeout
 		if kind == "tps" or kind == "tpsaim":
 			player.set_tps(true, true)
 			player.aiming = kind == "tpsaim"

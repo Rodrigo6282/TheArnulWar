@@ -13,6 +13,11 @@ uniform sampler2D tex_arm : hint_default_white, filter_linear_mipmap_anisotropic
 uniform sampler2D tex_rough : hint_default_white, filter_linear_mipmap_anisotropic;
 uniform sampler2D tex_spec : hint_default_black, filter_linear_mipmap_anisotropic;
 uniform float use_arm = 1.0;
+// Unreal-style sets (Classic Weapons Pack): packed map is R roughness, G metallic, B occlusion and
+// the normal map is DirectX (green flipped)
+uniform float rmao = 0.0;
+uniform float nor_dx = 0.0;
+uniform vec4 base_col : source_color = vec4(1.0);   // multiplies the albedo (untextured parts: brass rounds)
 uniform float rough_mul = 1.0;
 uniform vec4 tint : source_color = vec4(1.0);
 uniform float camo = 0.0;
@@ -48,16 +53,26 @@ void vertex() {
 }
 
 void fragment() {
-	vec3 a = texture(tex_alb, UV).rgb;
+	vec3 a = texture(tex_alb, UV).rgb * base_col.rgb;
 	float ao = 1.0;
 	float rough;
 	float metal;
 	if (use_arm > 0.5) {
 		vec3 arm = texture(tex_arm, UV).rgb;
-		ao = arm.r;
-		rough = arm.g;
-		metal = arm.b;
-		NORMAL_MAP = texture(tex_nor, UV).rgb;
+		if (rmao > 0.5) {
+			rough = arm.r;
+			metal = arm.g;
+			ao = arm.b;
+		} else {
+			ao = arm.r;
+			rough = arm.g;
+			metal = arm.b;
+		}
+		vec3 nm = texture(tex_nor, UV).rgb;
+		if (nor_dx > 0.5) {
+			nm.g = 1.0 - nm.g;
+		}
+		NORMAL_MAP = nm;
 	} else {
 		rough = clamp(texture(tex_rough, UV).r * rough_mul, 0.08, 1.0);
 		float sp = dot(texture(tex_spec, UV).rgb, vec3(0.333));
