@@ -3,6 +3,7 @@ extends Node
 ## Zombis rounds), medals and profile, menus.
 
 const WorldBuilder := preload("res://scripts/world.gd")
+const GLASS := preload("res://scripts/glass.gd")
 const PlayerScript := preload("res://scripts/player.gd")
 const SoldierScript := preload("res://scripts/soldier.gd")
 const ZombieScript := preload("res://scripts/zombie.gd")
@@ -17,7 +18,14 @@ const DIFF_ACC := [0.6, 1.0, 1.35]
 const DIFF_DMG := [0.6, 1.0, 1.45]
 const BUY_NAMES := {0: "AR-7 FUSIL", 1: "M-12 ESCOPETA", 2: "P9 MUNICIÓN", 3: "V-9 SUBFUSIL", 4: "R-700 FRANCOTIRADOR", 5: "K-90 AMETRALLADORA"}
 
-var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "ffa", "voice": 0}
+var settings := {"sens": 1.0, "quality": 1, "fullscreen": true, "diff": 1, "map": 0, "name": "Jugador", "last_ip": "127.0.0.1", "op": 0, "mp_mode": "ffa", "voice": 0, "streaks": ["uav", "bomber", "heli"], "tps": false,
+	# OPCIONES screen: image, controls, sound and graphics
+	"bright": 1.0, "fov": 75.0, "ads_sens": 1.0, "invert_y": false,
+	"vol_master": 0.85, "vol_sfx": 1.0, "vol_voice": 1.0,
+	"scale": 1.0, "shadows": 1, "bloom": true, "fps_cap": 0, "vsync": true, "show_fps": false, "weather": true,
+	"tuned": false,          # one-time automatic tuning for this PC's graphics card already done
+	"mp_bots": 3, "bot_skill": 1,
+	"credits": 0, "armory": {}}
 var state := "menu"
 var mode := "ops"
 var map_idx := 0
@@ -61,7 +69,12 @@ var ks_given := {}
 var streak_ready: Array = []
 var radar_t := 0.0
 var pickups: Array = []
-const STREAKS := {3: ["uav", "UAV"], 5: ["bomber", "BOMBARDERO"], 7: ["heli", "HELICÓPTERO FURTIVO"]}
+var credits_game := 0     # ARMERO credits earned in the current game
+var streak_table := {}      # kills -> streak id (chosen in the ARMERO, + the nuke), set in start_game
+var nuke_t := -1.0          # nuke countdown (s), -1 = none
+var nuke_by := ""           # who launched it (name)
+var nuke_mine := false
+var nuke_beep := 0
 const StreaksScript := preload("res://scripts/streaks.gd")
 const NetScript := preload("res://scripts/net.gd")
 var net
@@ -118,6 +131,8 @@ func _ready() -> void:
 	var m := arg_value("--map")
 	load_map(int(m) if m != "" else clampi(settings.map, 0, WorldBuilder.MAPS.size() - 1))
 	apply_quality()
+	if not has_arg("--autotest") and arg_value("--shot") == "" and not has_arg("--perf") and arg_value("--mptest") == "":
+		auto_tune()
 	if has_arg("--noocc"):
 		get_viewport().use_occlusion_culling = false
 	if not has_arg("--autotest") and arg_value("--shot") == "":
@@ -133,12 +148,18 @@ func _ready() -> void:
 		_mptest(arg_value("--mptest"))
 	elif has_arg("--climbtest"):
 		_climbtest()
+	elif has_arg("--glasstest"):
+		_glasstest()
 	elif has_arg("--stairtest"):
 		_stairtest()
 	elif has_arg("--botstairs"):
 		_botstairs()
 	elif has_arg("--onlinetest"):
 		_onlinetest()
+	elif has_arg("--aitest"):
+		_aitest()
+	elif has_arg("--bottest"):
+		_bottest()
 
 
 func has_arg(a: String) -> bool:
@@ -285,15 +306,24 @@ func apply_quality() -> void:
 	vp.msaa_3d = Viewport.MSAA_DISABLED
 	vp.use_taa = q == 2 and not has_arg("--notaa")
 	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA if q < 2 or has_arg("--notaa") else Viewport.SCREEN_SPACE_AA_DISABLED
-	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR if q == 0 else Viewport.SCALING_3D_MODE_BILINEAR
-	vp.scaling_3d_scale = 0.77 if q == 0 else 1.0
-	RenderingServer.directional_shadow_atlas_set_size(4096 if q == 2 else 2048, true)
-	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_HIGH if q == 2 else RenderingServer.SHADOW_QUALITY_SOFT_LOW)
+	# render resolution (OPCIONES): below 100 % the 3D image is upscaled with FSR 1 (cheap, sharp)
+	var sc := clampf(float(settings.scale), 0.5, 1.0)
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR if sc < 0.99 else Viewport.SCALING_3D_MODE_BILINEAR
+	vp.scaling_3d_scale = sc
+	# integrated GPUs: switch to the lower mesh LODs sooner on Baja
+	vp.mesh_lod_threshold = 2.0 if q == 0 else 1.0
+	# shadows (OPCIONES): 0 off, 1 normal (2 cascades, 2048), 2 high (4 cascades, 4096)
+	var shq: int = int(settings.shadows)
+	sun.shadow_enabled = shq > 0
+	RenderingServer.directional_shadow_atlas_set_size(4096 if shq == 2 else 2048, true)
+	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_HIGH if shq == 2 else RenderingServer.SHADOW_QUALITY_SOFT_LOW)
 	RenderingServer.positional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_LOW)
-	sun.directional_shadow_max_distance = [60.0, 90.0, 120.0][q]
+	sun.directional_shadow_max_distance = [60.0, 90.0, 120.0][q] if shq < 2 else 120.0
 	if fill and WorldBuilder.MAPS.size() > map_idx:
 		fill.light_energy = WorldBuilder.ENVS[WorldBuilder.MAPS[map_idx].env].sun_e * (0.34 if q < 2 else 0.14)
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS if q == 2 else DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS if shq == 2 else DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	e.glow_enabled = bool(settings.bloom)
+	apply_display()
 	# bloom: the full-res glow levels are the expensive ones on integrated GPUs; the lower-res
 	# levels give almost the same soft halo for a fraction of the cost
 	for lv in 7:
@@ -302,7 +332,65 @@ func apply_quality() -> void:
 	for lv in lv_on:
 		e.set_glow_level(lv, 1.0)
 	e.glow_normalized = true
-	fx.weather_quality(q)
+	fx.weather_quality(q if bool(settings.weather) else -1)
+
+
+## Graphics presets: choosing Baja / Media / Alta also resets the detailed options to sensible values.
+## `intel` = integrated GPU (Intel UHD / Iris): lower render resolution and no bloom on Baja.
+func quality_preset(q: int) -> void:
+	settings.quality = q
+	var gpu := RenderingServer.get_video_adapter_name().to_lower()
+	var intel := gpu.contains("intel") and not gpu.contains("arc")
+	settings.scale = [0.7 if intel else 0.8, 0.85 if intel else 1.0, 1.0][q]
+	settings.shadows = [1, 1, 2][q]
+	settings.bloom = q >= 1 or not intel
+	settings.weather = true
+	apply_quality()
+
+
+## First start of this version: tune the graphics for the PC's card (Intel UHD 620 here: Baja at 70 %
+## render resolution with FSR, no bloom, 60 FPS cap so the laptop doesn't overheat and throttle).
+func auto_tune() -> void:
+	if bool(settings.tuned) or DisplayServer.get_name() == "headless":
+		return
+	optimize_for_pc()
+
+
+## "Optimizar para este PC" (OPCIONES) and the first start: pick settings from the graphics card.
+func optimize_for_pc() -> void:
+	settings.tuned = true
+	var gpu := RenderingServer.get_video_adapter_name().to_lower()
+	if gpu.contains("intel") and not gpu.contains("arc"):
+		quality_preset(0)
+		settings.fps_cap = 60
+	elif gpu.contains("mx1") or gpu.contains("mx2") or gpu.contains("gt 1030") or gpu.contains("vega") or gpu.contains("radeon(tm) graphics"):
+		quality_preset(1)
+	else:
+		quality_preset(1 if gpu.contains("gtx 9") or gpu.contains("gtx 10") or gpu.contains("rx 5") else 2)
+	apply_quality()
+	save_settings()
+
+
+## Brightness, FPS cap, vsync and sound volumes (cheap to call at any time).
+func apply_display() -> void:
+	var e: Environment = env_node.environment
+	e.adjustment_brightness = clampf(float(settings.bright), 0.4, 1.8)
+	Engine.max_fps = int(settings.fps_cap)
+	if DisplayServer.get_name() != "headless" and not has_arg("--perf"):
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if bool(settings.vsync) else DisplayServer.VSYNC_DISABLED)
+	_set_bus("Master", float(settings.vol_master))
+	_set_bus("Efectos", float(settings.vol_sfx))
+	_set_bus("Voz", float(settings.vol_voice))
+	if player and is_instance_valid(player):
+		player.base_fov = float(settings.fov)
+
+
+func _set_bus(bus: String, lin: float) -> void:
+	var i := AudioServer.get_bus_index(bus)
+	if i < 0:
+		return
+	AudioServer.set_bus_volume_db(i, linear_to_db(maxf(lin, 0.0001)))
+	AudioServer.set_bus_mute(i, lin <= 0.001)
 
 
 func apply_fullscreen() -> void:
@@ -327,6 +415,13 @@ func load_settings() -> void:
 		var gpu := RenderingServer.get_video_adapter_name().to_lower()
 		if gpu.contains("intel") and not gpu.contains("arc"):
 			settings.quality = 0
+	# dev args --scale=0.7 --shadows=0..2 --bloom=0|1: measure single options with --perf
+	if arg_value("--scale") != "":
+		settings.scale = float(arg_value("--scale"))
+	if arg_value("--shadows") != "":
+		settings.shadows = int(arg_value("--shadows"))
+	if arg_value("--bloom") != "":
+		settings.bloom = arg_value("--bloom") == "1"
 
 
 func save_settings() -> void:
@@ -350,6 +445,7 @@ func medal_count() -> int:
 
 # ---------------------------------------------------------------- maps + navigation
 func load_map(i: int) -> void:
+	sfx.clear_surface_cache()
 	map_idx = i
 	settings.map = i
 	mode = WorldBuilder.MAPS[i].mode
@@ -443,12 +539,17 @@ func _reset() -> void:
 	wave_hit = false
 	medals_game = {}
 	kill_ctx = {}
+	credits_game = 0
 	air.clear()
 	_clear_pickups()
 	ks = 0
 	ks_given = {}
 	streak_ready = []
 	radar_t = 0.0
+	nuke_t = -1.0
+	nuke_mine = false
+	# the nuke only where a match can end (not in co-op / solo zombies)
+	streak_table = StreaksScript.table(settings, mode != "zombies")
 	ui.reset_feed()
 	if mode == "mp":
 		player.owned = [0, 1, 2, 3, 4, 5]
@@ -583,6 +684,7 @@ func to_menu() -> void:
 		player.queue_free()
 	player = null
 	state = "menu"
+	save_settings()
 	get_tree().paused = false
 	if map_dirty:
 		load_map(map_idx)
@@ -591,7 +693,7 @@ func to_menu() -> void:
 	ui.show_menu()
 
 
-func game_over() -> void:
+func game_over(victory := false) -> void:
 	state = "dead"
 	if mode == "ops" and score > best:
 		best = score
@@ -603,7 +705,7 @@ func game_over() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	var acc := 0 if shots == 0 else int(round(100.0 * hits / shots))
 	ui.show_gameover({"mode": mode, "score": score, "wave": wave, "round": rnd, "kills": kills, "heads": heads, "acc": acc,
-		"best": best, "best_round": best_round, "medals": medals_game})
+		"best": best, "best_round": best_round, "medals": medals_game, "credits": credits_game, "victory": victory})
 
 
 func interact() -> void:
@@ -649,6 +751,7 @@ func _process(delta: float) -> void:
 		cam = player.camera
 		# online the world keeps running while the pause menu is open
 		if state == "playing" or (state == "paused" and net.active):
+			_update_nuke(delta)
 			if mode == "zombies":
 				zm.update(delta)
 			elif mode == "mp":
@@ -691,6 +794,7 @@ func _update_waves(delta: float) -> void:
 	elif alive_count() == 0:
 		var bonus := wave * 250
 		score += bonus
+		add_credits(20 + wave * 5)
 		ui.notice("OLEADA %d SUPERADA" % wave, "+%d puntos" % bonus, 3.0)
 		if not wave_hit:
 			award_medal("wave")
@@ -715,21 +819,33 @@ func _spawn_soldier() -> void:
 
 
 # ---------------------------------------------------------------- kills + medals
+## ARMERO credits: earned by kills (more for headshots, 50 for a zombie boss).
+func add_credits(n: int) -> void:
+	credits_game += n
+	settings.credits = int(settings.get("credits", 0)) + n
+
+
 func register_kill(head: bool, _victim = null) -> void:
+	add_credits(50 if _victim != null and _victim.get("boss") == true else (15 if head else 10))
 	kills += 1
 	streak += 1
 	ks += 1
-	if STREAKS.has(ks) and not ks_given.has(ks):
+	if streak_table.has(ks) and not ks_given.has(ks):
 		ks_given[ks] = true
-		var st: Array = STREAKS[ks]
+		var sid: String = streak_table[ks]
+		var sname: String = StreaksScript.DEFS[sid].name
 		sfx.play("radar", -2)
-		if st[0] == "uav":
+		if sid == "uav":
 			radar_t = 30.0
 			air.uav(30.0)
 			ui.notice("RACHA: UAV", "Dron de reconocimiento: enemigos marcados 30 segundos", 2.5)
+		elif sid == "nuke":
+			# the nuke jumps the queue
+			streak_ready.push_front(sid)
+			ui.notice("¡NUCLEAR DISPONIBLE!", "%d bajas seguidas · pulsa B para lanzarla y ganar la partida" % ks, 4.0)
 		else:
-			streak_ready.append(st[0])
-			ui.notice("RACHA: %s" % st[1], "Pulsa B para usarla", 2.5)
+			streak_ready.append(sid)
+			ui.notice("RACHA: %s" % sname.to_upper(), "Pulsa B para usarla", 2.5)
 	if head:
 		heads += 1
 	if mode == "ops" or mode == "mp":
@@ -902,18 +1018,50 @@ func on_player_hit() -> void:
 
 func hud_info() -> String:
 	var t := "Granadas: %d   ·   Racha: %d" % [player.grenades, ks]
+	# next streak of the loadout
+	var nxt := 9999
+	for k in streak_table:
+		if int(k) > ks and int(k) < nxt and not ks_given.has(k):
+			nxt = int(k)
+	if nxt < 9999:
+		t += "   ·   %s en %d" % [StreaksScript.DEFS[streak_table[nxt]].name, nxt - ks]
 	if radar_t > 0.0:
 		t += "\nUAV activo %ds" % ceili(radar_t)
 	if not streak_ready.is_empty():
-		t += "\n[B] " + {"bomber": "Bombardero", "heli": "Helicóptero furtivo"}[streak_ready[0]]
+		t += "\n[B] " + str(StreaksScript.DEFS[streak_ready[0]].name)
+		if streak_ready.size() > 1:
+			t += "  (+%d)" % (streak_ready.size() - 1)
+	if nuke_t > 0.0:
+		t += "\nNUCLEAR: %d" % ceili(nuke_t)
 	return t
 
 
 func use_streak() -> void:
-	if streak_ready.is_empty() or state != "playing" or player == null:
+	if streak_ready.is_empty() or state != "playing" or player == null or not player.alive:
+		return
+	if streak_ready[0] == "nuke" and (nuke_t > 0.0 or (net.active and net.ended)):
 		return
 	var kind: String = streak_ready.pop_front()
 	var cam: Camera3D = player.camera
+	match kind:
+		"nuke":
+			launch_nuke()
+			return
+		"supply":
+			_supply_drop()
+			return
+		"mortar":
+			ui.notice("MORTERO", "Proyectiles en camino", 2.0)
+			air.mortar(_aim_point(70.0, 10.0))
+			return
+		"drone":
+			ui.notice("DRON KAMIKAZE", "Busca al enemigo visible más cercano", 2.0)
+			air.drone()
+			return
+		"gunship":
+			ui.notice("CAÑONERO", "Apoyo aéreo pesado durante 30 segundos", 2.0)
+			air.gunship(30.0)
+			return
 	if kind == "bomber":
 		# carpet bombing along where the player is looking
 		var fwd: Vector3 = -cam.global_transform.basis.z
@@ -933,6 +1081,99 @@ func use_streak() -> void:
 		air.heli(35.0)
 
 
+## Ground point the player is looking at (at least min_d away from the player).
+func _aim_point(max_d: float, min_d: float) -> Vector3:
+	var cam: Camera3D = player.camera
+	var fwd: Vector3 = -cam.global_transform.basis.z
+	var flat := Vector3(fwd.x, 0, fwd.z).normalized()
+	var q := PhysicsRayQueryParameters3D.create(cam.global_position, cam.global_position + fwd * max_d, 1)
+	var hit := player.get_world_3d().direct_space_state.intersect_ray(q)
+	var c: Vector3 = hit.position if not hit.is_empty() else player.global_position + flat * 30.0
+	c.y = 0.0
+	var pflat := Vector3(player.global_position.x, 0, player.global_position.z)
+	if c.distance_to(pflat) < min_d:
+		c = pflat + flat * (min_d + 4.0)
+	return c
+
+
+## Supply crate: ammo + grenades on the ground next to the player, full health.
+func _supply_drop() -> void:
+	var fwd: Vector3 = -player.camera.global_transform.basis.z
+	var p: Vector3 = player.global_position + Vector3(fwd.x, 0, fwd.z).normalized() * 1.8
+	var q := PhysicsRayQueryParameters3D.create(player.global_position + Vector3(0, 1, 0), p + Vector3(0, 1, 0), 1)
+	if not player.get_world_3d().direct_space_state.intersect_ray(q).is_empty():
+		p = player.global_position
+	for k in 3:
+		_spawn_pickup(p + Vector3(randf_range(-0.7, 0.7), 0, randf_range(-0.7, 0.7)), "ammo")
+	for k in 2:
+		_spawn_pickup(p + Vector3(randf_range(-0.7, 0.7), 0, randf_range(-0.7, 0.7)), "nade")
+	player.health = player.max_health
+	fx.puff(p + Vector3(0, 0.5, 0), Color(0.4, 0.9, 0.45), 2.0, 1.8, 0.35)
+	sfx.play("buy")
+	ui.notice("SUMINISTROS", "Munición, granadas y salud al máximo", 2.0)
+
+
+# ---------------------------------------------------------------- nuke (30-kill streak)
+## The local player launches the nuke: 10 s countdown for everybody, then the match ends and the
+## launcher wins (offline: victory screen in Operación).
+func launch_nuke() -> void:
+	var who: String = str(settings.get("name", "Jugador"))
+	if net.active:
+		net.nuke_send()
+	else:
+		nuke_countdown(who, true)
+
+
+func nuke_countdown(who: String, mine: bool) -> void:
+	if nuke_t > 0.0:
+		return
+	nuke_t = 10.0
+	nuke_by = who
+	nuke_mine = mine
+	nuke_beep = 10
+	sfx.play("radar", 2.0)
+	ui.notice("¡NUCLEAR ENTRANTE!", ("Lanzada por ti" if mine else "Lanzada por %s" % who) + " · detonación en 10 segundos", 3.0)
+
+
+func _update_nuke(delta: float) -> void:
+	if nuke_t <= 0.0:
+		return
+	nuke_t -= delta
+	var sec := ceili(nuke_t)
+	if sec < nuke_beep and sec > 0:
+		nuke_beep = sec
+		sfx.play("click", 4.0)
+		if sec <= 5:
+			ui.notice("NUCLEAR: %d" % sec, "Lanzada por %s" % ("ti" if nuke_mine else nuke_by), 1.0)
+	if nuke_t <= 0.0:
+		nuke_t = -1.0
+		_nuke_detonate()
+
+
+func _nuke_detonate() -> void:
+	ui.nuke_flash()
+	sfx.play("boom", 8.0)
+	sfx.play("boom", 6.0)
+	if player and is_instance_valid(player):
+		fx.flash_light(player.global_position + Vector3(0, 30, 0), 30.0, 200.0)
+		player.shake = 1.5
+	if net.active:
+		# the host ends the match for everyone with the launcher as the winner
+		if net.is_host:
+			net.nuke_end()
+		return
+	# offline (Operación): everything dies and the mission is won
+	for e in enemies.duplicate():
+		if is_instance_valid(e) and not e.dead:
+			e.take_damage(1.0e7, false)
+	score += 5000
+	add_credits(200)
+	if mode == "ops" and player and player.alive:
+		await get_tree().create_timer(1.2, false).timeout
+		if state == "playing" or state == "paused":
+			game_over(true)
+
+
 ## Explosion damage with falloff and wall occlusion; credits kills for medals.
 func explode(pos: Vector3, dmg: float, radius: float, kind: String) -> void:
 	if state != "playing" and state != "paused":
@@ -942,6 +1183,9 @@ func explode(pos: Vector3, dmg: float, radius: float, kind: String) -> void:
 	if net.active:
 		net.boom(pos, radius)
 	var space := world.get_world_3d().direct_space_state
+	# window glass nearby shatters
+	if GLASS.current != null and is_instance_valid(GLASS.current):
+		GLASS.current.blast(pos, radius * 1.1)
 	# explosive barrels nearby go off too (short fuse = chain reaction)
 	for b in get_tree().get_nodes_in_group("xbarrel"):
 		if is_instance_valid(b) and not b.gone and b.global_position.distance_to(pos) < radius * 0.8:
@@ -974,6 +1218,41 @@ func explode(pos: Vector3, dmg: float, radius: float, kind: String) -> void:
 				player.take_damage(dmg * 0.55 * (1.0 - pd / radius), pos)
 
 
+## Grenade thrown by a soldier / bot (soldier._throw_nade): hurts the player, and for a bot its
+## enemies; it never credits kills to the local player. `me` may already be freed.
+func enemy_nade_blast(pos: Vector3, me_id: int, me) -> void:
+	if state != "playing" and state != "paused":
+		return
+	fx.explosion(pos, 0.9)
+	sfx.play3d("boom", pos, 4.0)
+	if net.active:
+		net.boom(pos, 6.5)
+	var space := world.get_world_3d().direct_space_state
+	var victims: Array = [player] if me_id == 0 else net.bot_enemies(me_id)
+	for v in victims:
+		if v == null or not is_instance_valid(v):
+			continue
+		if (v.get("alive") != null and not v.alive) or (v.get("dead") != null and v.dead):
+			continue
+		var d: float = v.global_position.distance_to(pos)
+		if v == player:
+			player.shake = maxf(player.shake, clampf(1.2 - d / 25.0, 0.0, 1.0))
+		if d > 6.5:
+			continue
+		var q := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 0.4, 0), v.global_position + Vector3(0, 1.0, 0), 1)
+		if not space.intersect_ray(q).is_empty():
+			continue
+		var dmg := 120.0 * (1.0 - d / 6.5)
+		if me != null and is_instance_valid(me):
+			me._deal(v, dmg, false, pos)
+		elif v == player:
+			if me_id > 0:
+				net.last_attacker = me_id
+				player.take_damage(dmg, pos)
+			else:
+				damage_player(dmg, pos)
+
+
 func damage_player(amount: float, from: Vector3) -> void:
 	if player and player.alive:
 		player.take_damage(amount * DIFF_DMG[settings.diff], from)
@@ -1004,9 +1283,9 @@ func _autotest() -> void:
 		log.append("%s:%d/%d" % [player.weapons[w].short, player.weapons[w].ammo, player.weapons[w].reserve])
 	player.melee()
 	await get_tree().create_timer(0.8).timeout
-	streak_ready = ["bomber", "heli"]
-	use_streak()
-	use_streak()
+	streak_ready = ["bomber", "heli", "mortar", "drone", "gunship", "supply"]
+	for k in 6:
+		use_streak()
 	air.uav(5.0)
 	await get_tree().create_timer(8.0).timeout
 	log.append("streaks craft=%d bombs=%d kills=%d" % [air.craft.size(), air.bombs.size(), kills])
@@ -1099,7 +1378,7 @@ func _mptest(role: String) -> void:
 		await get_tree().create_timer(4.0).timeout
 		var cid := 0
 		for id in net.players:
-			if id != 1:
+			if id != 1 and not net.is_bot(id):
 				cid = id
 		log.append("puppet_client=%s ally=%s" % [str(net.puppets.has(cid)), str(net.is_ally(cid))])
 		if mm == "tdm":
@@ -1119,6 +1398,10 @@ func _mptest(role: String) -> void:
 			log.append("team_kills=%s" % str(net.team_kills))
 		if mm == "zombies":
 			log.append("host_zombies_end=%d pts_cliente=%d" % [alive_count(), int(net.pts.get(cid, -1))])
+		if has_arg("--nuke") and mm != "zombies":
+			launch_nuke()
+			await get_tree().create_timer(11.0).timeout
+			log.append("nuke_by=%d ended=%s" % [net.nuke_by, str(net.ended)])
 	else:
 		await get_tree().create_timer(1.5).timeout
 		if role == "lanjoin":   # find the host through the LAN beacon instead of a typed IP
@@ -1203,6 +1486,14 @@ func _mptest(role: String) -> void:
 		if net.gmode == "gun":
 			log.append("client_owned=%s" % str(player.owned))
 		log.append("alive_after_respawn=%s" % str(player != null and player.alive))
+		var bp := 0
+		for pid in net.puppets:
+			if int(pid) >= net.BOT_ID0 and is_instance_valid(net.puppets[pid]):
+				bp += 1
+		log.append("bot_puppets=%d bots_in_list=%d" % [bp, net.players.keys().filter(func(k): return net.is_bot(k)).size()])
+		if has_arg("--nuke"):
+			await get_tree().create_timer(16.0).timeout
+			log.append("cliente nuke_by=%d ended=%s" % [net.nuke_by, str(net.ended)])
 		await get_tree().create_timer(4.0).timeout
 	var sc := []
 	for id in net.players:
@@ -1214,6 +1505,85 @@ func _mptest(role: String) -> void:
 
 
 ## Invite codes: format, check letter and typo detection.
+## --bottest [--mpmode=ffa|tdm|gun] [--secs=N]: host alone with 5 bots; prints kills/deaths and errors.
+func _bottest() -> void:
+	await get_tree().process_frame
+	settings.mp_bots = int(arg_value("--bots")) if arg_value("--bots") != "" else 5
+	var md := arg_value("--mpmode") if arg_value("--mpmode") != "" else "ffa"
+	var err: String = net.host("Prueba", 0, net.PORT + 3, md, false)
+	print("BOTTEST host err='%s' players=%d" % [err, net.players.size()])
+	net.start_match()
+	await get_tree().create_timer(1.0).timeout
+	player.god = arg_value("--mortal") == ""
+	var secs := float(arg_value("--secs")) if arg_value("--secs") != "" else 40.0
+	var t := 0.0
+	var hp_min := 100.0
+	while t < secs:
+		await get_tree().create_timer(5.0).timeout
+		t += 5.0
+		var line := []
+		for id in net.players:
+			var p: Dictionary = net.players[id]
+			line.append("%s:%d/%d%s" % [str(p.name).substr(0, 6), int(p.kills), int(p.deaths), (" L%d" % int(p.lvl)) if md == "gun" else ""])
+		var alive_b := 0
+		var cover_n := 0
+		for id in net.bot_nodes:
+			var b = net.bot_nodes[id]
+			if is_instance_valid(b) and not b.dead:
+				alive_b += 1
+				if b.cover_state > 0:
+					cover_n += 1
+		print("BOTTEST t=%d bots_alive=%d in_cover=%d tk=%s  %s" % [int(t), alive_b, cover_n, str(net.team_kills), "  ".join(line)])
+		if has_arg("--v"):
+			for id in net.bot_nodes:
+				var b = net.bot_nodes[id]
+				if is_instance_valid(b):
+					var tg = b.target
+					print("  nxt=%s floor=%s | bot %d cs=%d fin=%s goal=%s ok=%s team=%d pos=%s tgt=%s d=%.1f los=%s vel=%.1f" % [str(b.agent.get_next_path_position().round()), str(b.is_on_floor()), id, b.cover_state, str(b.agent.is_navigation_finished()), str(b.agent.target_position.round()), str(b.agent.is_target_reachable()), net.team_of(id), str(b.global_position.round()), str(tg.get("bot_id") if tg != null and is_instance_valid(tg) and tg.get("bot_id") != null else ("player" if tg == player else "none")), b.global_position.distance_to(tg.global_position) if tg != null and is_instance_valid(tg) else -1.0, str(b.los), Vector2(b.velocity.x, b.velocity.z).length()])
+	print("BOTTEST done")
+	get_tree().quit()
+
+
+## --aitest: soldiers run from a live grenade, hold fire beyond their range, get suppressed.
+func _aitest() -> void:
+	await get_tree().process_frame
+	load_map(0)
+	start_game()
+	intermission = 999.0
+	player.god = true
+	var pp: Vector3 = player.global_position
+	var mk := func(off: Vector3):
+		var s = SoldierScript.new()
+		s.game = self
+		add_child(s)
+		s.global_position = pp + off
+		enemies.append(s)
+		return s
+	var a = mk.call(Vector3(0, 0.3, -14))
+	var far = mk.call(Vector3(0, 0.3, -80))
+	far.speed = 0.0
+	await get_tree().create_timer(1.0).timeout
+	var nade := Node3D.new()
+	add_child(nade)
+	nade.global_position = a.global_position + Vector3(1.0, 0.1, 0)
+	nade.add_to_group("live_nade")
+	nade.set_meta("owner", -1)
+	var p0: Vector3 = a.global_position
+	await get_tree().create_timer(0.4).timeout
+	var fleeing: bool = a.flee_t > 0.0
+	await get_tree().create_timer(1.6).timeout
+	var moved: float = a.global_position.distance_to(nade.global_position) - p0.distance_to(nade.global_position)
+	nade.queue_free()
+	var far_shots0: float = far.last_shot
+	await get_tree().create_timer(4.0).timeout
+	var far_fired: bool = far.last_shot != far_shots0
+	# suppression: shoot right past soldier a
+	var sup0: float = a.suppress
+	player._alert_enemies(pp + Vector3(0, 1.6, 0), a.global_position + Vector3(0.8, 1.2, 0) + (a.global_position - pp).normalized() * 5.0, false)
+	print("AITEST flee=%s ran_away=%.1fm far_dist=%.0f far_fired=%s suppress %.1f->%.1f intel=%s" % [str(fleeing), moved, far.global_position.distance_to(pp), str(far_fired), sup0, a.suppress, str(clock - a.intel_t < 1.0)])
+	get_tree().quit()
+
+
 func _onlinetest() -> void:
 	await get_tree().process_frame
 	var OL := preload("res://scripts/online.gd")
@@ -1371,6 +1741,83 @@ func _climbtest() -> void:
 	mp_respawn()
 	log.append("tras reaparecer: disparando=%s apuntando=%s recargando=%s vivo=%s" % [str(player.mouse_down), str(player.aiming), str(player.reloading), str(player.alive)])
 	print("CLIMBTEST ", " | ".join(log))
+	get_tree().quit()
+
+
+## Window glass: shoot a pane, vault through another, blow up a third (--glasstest [--map=N]).
+func _glasstest() -> void:
+	await get_tree().process_frame
+	start_game()
+	intermission = 999.0
+	player.god = true
+	var log := []
+	var gs = GLASS.current
+	if gs == null:
+		print("GLASSTEST sin cristales")
+		get_tree().quit()
+		return
+	var ground := []
+	for k in gs.panes.size():
+		var xf: Transform3D = gs.panes[k].xf
+		if xf.origin.y < 2.0:
+			ground.append(k)
+	log.append("paneles=%d planta_baja=%d" % [gs.panes.size(), ground.size()])
+	# 1) shoot: stand 3 m in front of the pane, look at it
+	var k1: int = ground[0]
+	var x1: Transform3D = gs.panes[k1].xf
+	var n1 := x1.basis.z.normalized()
+	var side := 1.0
+	var p0 := x1.origin + n1 * 3.0
+	if not WorldBuilder.is_free(p0.x, p0.z, 0.4):
+		side = -1.0
+	p0 = x1.origin + n1 * 3.0 * side
+	player.global_position = Vector3(p0.x, 0.05, p0.z)
+	var to := x1.origin - player.global_position
+	player.yaw = atan2(-to.x, -to.z)
+	await get_tree().create_timer(0.5).timeout
+	var cam: Camera3D = player.camera
+	player.pitch = atan2(x1.origin.y - cam.global_position.y, Vector2(to.x, to.z).length())
+	await get_tree().create_timer(0.2).timeout
+	var out := arg_value("--out")
+	if out != "":
+		await get_tree().create_timer(0.6).timeout
+		get_viewport().get_texture().get_image().save_png(out.replace(".png", "_a.png"))
+	player.fire()
+	await get_tree().create_timer(0.12).timeout
+	if out != "":
+		get_viewport().get_texture().get_image().save_png(out.replace(".png", "_b.png"))
+		await get_tree().create_timer(1.5).timeout
+		get_viewport().get_texture().get_image().save_png(out.replace(".png", "_c.png"))
+	log.append("disparo: roto=%s" % str(gs.panes[k1].broken))
+	# 2) vault through another ground pane
+	var k2: int = -1
+	for k in ground:
+		var xf: Transform3D = gs.panes[k].xf
+		var nn := xf.basis.z.normalized()
+		for sd in [1.0, -1.0]:
+			var pp: Vector3 = xf.origin + nn * 0.9 * sd
+			if k != k1 and WorldBuilder.is_free(pp.x, pp.z, 0.3) and k2 < 0:
+				k2 = k
+				player.global_position = Vector3(pp.x, 0.05, pp.z)
+				player.yaw = atan2(nn.x * sd, nn.z * sd)
+	if k2 >= 0:
+		player.pitch = 0.0
+		await get_tree().create_timer(0.4).timeout
+		var ok: bool = player._try_climb()
+		await get_tree().create_timer(1.3).timeout
+		log.append("saltar ventana: trepa=%s roto=%s" % [str(ok), str(gs.panes[k2].broken)])
+	# 3) explosion next to a third pane
+	for k in ground:
+		if not gs.panes[k].broken:
+			explode((gs.panes[k].xf as Transform3D).origin + Vector3(0, -1.0, 0), 10.0, 4.0, "grenade")
+			log.append("explosion: roto=%s" % str(gs.panes[k].broken))
+			break
+	var nb := 0
+	for p in gs.panes:
+		if p.broken:
+			nb += 1
+	log.append("rotos=%d" % nb)
+	print("GLASSTEST ", " | ".join(log))
 	get_tree().quit()
 
 
@@ -1550,6 +1997,14 @@ func _shot(kind: String, out: String) -> void:
 	if q != "":
 		settings.quality = int(q)
 		apply_quality()
+	# --att=mira:red,boca:supp  --camo=oro: Armero setup on every weapon for first-person shots
+	if arg_value("--att") != "" or (arg_value("--camo") != "" and not kind.begins_with("armero")):
+		for wi in 6:
+			var ac: Dictionary = preload("res://scripts/armory.gd").cfg(settings, wi)
+			for pair in arg_value("--att").split(",", false):
+				ac.att[pair.get_slice(":", 0)] = pair.get_slice(":", 1)
+			if arg_value("--camo") != "":
+				ac.camo = arg_value("--camo")
 	if kind.begins_with("inspect"):
 		start_game()
 		intermission = 999.0
@@ -1574,6 +2029,32 @@ func _shot(kind: String, out: String) -> void:
 	elif kind == "mp":
 		ui.show_mp()
 		await get_tree().create_timer(3.0).timeout
+	elif kind == "menu" or kind == "mp":
+		ui.show_menu()
+		if kind == "mp":
+			ui.show_mp()
+		await get_tree().create_timer(1.5).timeout
+		get_viewport().get_texture().get_image().save_png(out)
+		get_tree().quit()
+		return
+	elif kind.begins_with("armero") or kind.begins_with("opciones"):
+		# menu screens: --shot=armero_W (weapon W with some attachments) / opciones_T (tab T)
+		if kind.begins_with("armero"):
+			var wi := int(kind.get_slice("_", 1)) if kind.contains("_") else 0
+			settings.credits = 5000
+			var c: Dictionary = preload("res://scripts/armory.gd").cfg(settings, wi)
+			c.att = {"mira": "red", "boca": "supp", "cargador": "ext", "empunadura": "vert"}
+			c.camo = arg_value("--camo") if arg_value("--camo") != "" else "bosque"
+			ui.arm_wi = wi
+			ui.show_armory()
+		else:
+			ui.show_options(false)
+			var tabs: TabContainer = ui.opt_p.find_children("*", "TabContainer", true, false)[0]
+			tabs.current_tab = int(kind.get_slice("_", 1)) if kind.contains("_") else 0
+		await get_tree().create_timer(1.5).timeout
+		get_viewport().get_texture().get_image().save_png(out)
+		get_tree().quit()
+		return
 	elif kind == "lobby" or kind == "coophud":
 		# fake teammates (no second PC needed) to look at the lobby / co-op HUD
 		net.host("Rodri", 3 if kind == "coophud" else 0, net.PORT, "zombies" if kind == "coophud" else "tdm", false)
@@ -1648,6 +2129,11 @@ func _shot(kind: String, out: String) -> void:
 		var yw := arg_value("--yaw")
 		if yw != "":
 			player.yaw = float(yw)
+		if arg_value("--pitch") != "":
+			player.pitch = float(arg_value("--pitch"))
+		if has_arg("--surfdbg"):
+			await get_tree().create_timer(1.0).timeout
+			print("SURF map %d at %s -> %s" % [map_idx, str(player.global_position), sfx.surface_at(player.global_position, map_idx)])
 		await get_tree().create_timer(2.5).timeout
 	elif kind == "zombies":
 		start_game()
@@ -1689,6 +2175,8 @@ func _shot(kind: String, out: String) -> void:
 				player.test_reload(true)
 				await get_tree().create_timer(float(arg_value("--wait")) if arg_value("--wait") != "" else 0.7).timeout
 			player.aiming = false
+		if has_arg("--ikdbg") and player.fp_arms:
+			print("IKDBG ", player.fp_arms.ik.reach)
 		if kind.begins_with("aim_"):
 			player.test_switch(int(kind.substr(4)))
 			player.aiming = true
@@ -1741,6 +2229,72 @@ func _shot(kind: String, out: String) -> void:
 				player.fire_cd = 0.0
 				player.fire()
 				await get_tree().create_timer(0.09).timeout
+		if kind == "tps" or kind == "tpsaim":
+			player.set_tps(true, true)
+			player.aiming = kind == "tpsaim"
+			await get_tree().create_timer(1.2).timeout
+			for i in 3:
+				player.fire_cd = 0.0
+				player.fire()
+				await get_tree().create_timer(0.1).timeout
+		if kind == "wintest":
+			# second-floor windows: walk at every upper window from inside, jumping and pressing climb,
+			# and report the ones the player ends up falling out of
+			player.god = true
+			intermission = 9999.0
+			var n_all := 0
+			var n_out := 0
+			var space := player.get_world_3d().direct_space_state
+			for xf in WorldBuilder._glass_list_debug:
+				var o: Vector3 = xf.origin
+				if o.y < 3.0:
+					continue
+				var nrm: Vector3 = xf.basis.z.normalized()
+				var floor_y: float = o.y - 1.66
+				for sd in [-1.0, 1.0]:
+					var stand: Vector3 = Vector3(o.x, floor_y + 0.05, o.z) + nrm * sd * 1.0
+					var fr := space.intersect_ray(PhysicsRayQueryParameters3D.create(stand + Vector3(0, 0.5, 0), stand - Vector3(0, 0.5, 0), 1))
+					if fr.is_empty():
+						continue   # outside
+					n_all += 1
+					player.global_position = stand
+					player.velocity = Vector3.ZERO
+					var fw: Vector3 = -nrm * sd
+					player.yaw = atan2(-fw.x, -fw.z)
+					player.test_iz = 1.0
+					var t := 0.0
+					while t < 2.5:
+						await get_tree().physics_frame
+						t += 1.0 / 60.0
+						if player.climb_t < 0.0:
+							if player.is_on_floor():
+								player.velocity.y = 7.0
+							else:
+								player._try_climb()
+					player.test_iz = 0.0
+					var gp: Vector3 = player.global_position
+					var through: float = (gp - o).dot(fw)
+					if gp.y < floor_y - 1.0 or through > 0.3:
+						n_out += 1
+						print("WIN OUT window %s from %s -> %s" % [str(o), str(stand), str(gp)])
+			print("WINTEST map %d upper windows tested=%d fell_out=%d" % [map_idx, n_all, n_out])
+		if kind.begins_with("streak_"):
+			# --shot=streak_<id> [--wait=S]: use one killstreak against the test soldiers
+			player.god = true
+			streak_ready = [kind.substr(7)]
+			var n0 := alive_count()
+			use_streak()
+			await get_tree().create_timer(float(arg_value("--wait")) if arg_value("--wait") != "" else 5.0).timeout
+			print("STREAK %s craft=%d alive %d -> %d kills=%d" % [kind.substr(7), air.craft.size(), n0, alive_count(), kills])
+		if kind == "nuke" or kind == "nukeover":
+			# 30-kill streak: earned, launched with B, detonates after 10 s (victory screen offline)
+			player.god = true
+			ks = StreaksScript.NUKE_KILLS - 1
+			register_kill(false, null)
+			print("NUKE ready=", streak_ready)
+			use_streak()
+			await get_tree().create_timer(10.15 if kind == "nuke" else 13.0).timeout
+			print("NUKE state=", state, " nuke_t=", nuke_t, " enemies alive=", alive_count())
 		if kind == "medal":
 			award_medal("double")
 			await get_tree().create_timer(0.3).timeout

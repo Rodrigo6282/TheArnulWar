@@ -595,7 +595,7 @@ static func pistol() -> Dictionary:
 	forearm(left, lpc, lpc + Vector3(-0.02, -0.04, 0.045), Vector3(-0.3, -0.5, 1.0), true)
 	if scan:
 		# the scanned pistol sits ~3 cm lower (its sights are at y≈0): lift the aim / hip poses
-		return {"model": g, "hip": Vector3(0.11, -0.105, -0.4), "aim": Vector3(0, 0.0, -0.32), "flash": flash(g, Vector3(0, -0.018, -0.175), 0.22),
+		return {"model": g, "hip": Vector3(0.12, -0.13, -0.52), "aim": Vector3(0, -0.012, -0.5), "flash": flash(g, Vector3(0, -0.018, -0.175), 0.22),
 			"left": left, "mag": mag, "slide": slide, "kind": "pistol"}
 	return {"model": g, "hip": Vector3(0.11, -0.13, -0.4), "aim": Vector3(0, -0.031, -0.32), "flash": flash(g, Vector3(0, 0.0, -0.18), 0.22),
 		"left": left, "mag": mag, "slide": slide, "kind": "pistol"}

@@ -24,6 +24,10 @@ var hit_k := 0.0
 var hit_dir := 1.0
 var repath_t := 0.0
 var groan_t := 0.0
+var voice_p := 1.0         # own voice pitch (set in _ready)
+var breath_t := 2.0
+var foot_d := 0.0          # distance since the last step / drag sound
+var screamed := false
 var death_type := 0
 var headless := false
 var seed := 0.0
@@ -40,6 +44,25 @@ var net_facing := 0.0
 var net_seen := 0.0
 var swipe_seen := false
 var R := {}                 # Mixamo body (rig.gd); empty = procedural body
+# head height above the body origin (player.gd reads it for headshots)
+var head_h := 1.5
+# boss ("El Coloso", every 7 rounds): set `boss` BEFORE add_child so _ready sees it.
+# net_flags bits: 16 boss, 32 slamming (ground slam windup), 64 enraged.
+const BOSS_SCALE := 1.6
+const SLAM_T := 1.2         # windup + impact; the hit lands when slam_t crosses SLAM_HIT
+const SLAM_HIT := 0.3
+const SLAM_R := 6.0
+var boss := false
+var max_health := 150.0
+var body_scale := 1.0
+var rise_depth := 1.75
+var enraged := false
+var roar_t := 0.0
+var slam_t := 0.0
+var slam_cd := 7.0
+var slam_seen := false
+var boss_eyes: Node3D
+var boss_light: OmniLight3D
 
 static var M := {}
 static var ME := {}
@@ -187,9 +210,9 @@ func _ready() -> void:
 	collision_mask = 1 | 4
 	seed = randf() * 10.0
 	# toughness and speed scale with the round
-	health = 150.0 + minf(round_n - 1, 8) * 100.0
-	if round_n > 9:
-		health *= pow(1.1, round_n - 9)
+	health = 100.0 + minf(round_n - 1, 9) * 55.0
+	if round_n > 10:
+		health *= pow(1.07, round_n - 10)
 	var r := randf()
 	var run_p := clampf((round_n - 3) * 0.12, 0.0, 0.85)
 	var jog_p := clampf((round_n - 1) * 0.2, 0.0, 0.9)
@@ -203,22 +226,178 @@ func _ready() -> void:
 		gait_kind = 0
 		speed = randf_range(1.1, 1.6)
 	groan_t = randf_range(1.0, 5.0)
+	voice_p = randf_range(0.84, 1.14)
+	if boss:
+		_boss_stats()
+	max_health = health
 	var cs := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
-	cap.radius = 0.32
-	cap.height = 1.8
+	cap.radius = 0.5 if boss else 0.32
+	cap.height = 2.9 if boss else 1.8
 	cs.shape = cap
-	cs.position.y = 0.9
+	cs.position.y = cap.height * 0.5
 	add_child(cs)
 	agent = NavigationAgent3D.new()
-	agent.path_desired_distance = 0.6
-	agent.target_desired_distance = 0.8
-	agent.radius = 0.4
-	agent.height = 1.8
+	agent.path_desired_distance = 0.8 if boss else 0.6
+	agent.target_desired_distance = 1.2 if boss else 0.8
+	agent.radius = 0.6 if boss else 0.4
+	agent.height = cap.height
 	add_child(agent)
 	_build_body()
-	B.root.position.y = -1.75
-	game.fx.puff(global_position + Vector3(0, 0.1, 0), Color(0.35, 0.3, 0.25), 1.0, 1.4, 0.2)
+	if boss:
+		_boss_look()
+	B.root.position.y = -rise_depth
+	game.fx.puff(global_position + Vector3(0, 0.1, 0), Color(0.35, 0.3, 0.25), 1.0 * body_scale, 1.4, 0.2)
+
+
+## Boss toughness / speed (host side; remote copies only need the size).
+func _boss_stats() -> void:
+	body_scale = BOSS_SCALE
+	rise_depth = 1.75 * BOSS_SCALE
+	head_h = 2.45
+	gait_kind = 1
+	speed = 2.4
+	var players := 1
+	if game.net.is_coop():
+		players += game.net.puppets.size()
+	health = (2500.0 + round_n * 350.0) * players
+	slam_cd = randf_range(5.0, 7.0)
+	groan_t = 0.8
+
+
+## Boss look: scaled body, dark reddish tint, glowing eyes and a red glow light.
+func _boss_look() -> void:
+	(B.root as Node3D).scale = Vector3.ONE * BOSS_SCALE
+	if R.is_empty():
+		for m: StandardMaterial3D in mats:
+			m.albedo_color = m.albedo_color * Color(0.6, 0.32, 0.3)
+			m.emission_enabled = true
+			m.emission = Color(0.25, 0.02, 0.0)
+			m.emission_energy_multiplier = 0.4
+	boss_eyes = Node3D.new()
+	add_child(boss_eyes)
+	var em := StandardMaterial3D.new()
+	em.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	em.albedo_color = Color(3.0, 0.3, 0.08)
+	var es := _sphere(0.032)
+	for sx in [-1, 1]:
+		var mi := MeshInstance3D.new()
+		mi.mesh = es
+		mi.material_override = em
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.position = Vector3(0.055 * sx, 0.0, 0.0)
+		boss_eyes.add_child(mi)
+	boss_light = OmniLight3D.new()
+	boss_light.light_color = Color(1.0, 0.18, 0.08)
+	boss_light.light_energy = 1.2
+	boss_light.omni_range = 4.5
+	boss_light.shadow_enabled = false
+	boss_light.position = Vector3(0, 2.2, -0.4)
+	add_child(boss_light)
+	_update_boss_fx()
+
+
+## Eyes follow the head bone (placed in world space so they work with both bodies).
+func _update_boss_fx() -> void:
+	if boss_eyes == null:
+		return
+	var vis := not dead and not headless
+	boss_eyes.visible = vis
+	if boss_light:
+		boss_light.visible = not dead
+		boss_light.light_energy = (2.2 if enraged else 1.2) + (1.5 if slam_t > 0.0 else 0.0)
+	if not vis or B.get("head") == null:
+		return
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	var hp: Vector3 = (B.head as Node3D).global_position
+	boss_eyes.global_position = hp + Vector3.UP * 0.1 * body_scale + fwd * 0.1 * body_scale
+	boss_eyes.global_rotation = Vector3(0, rotation.y, 0)
+
+
+## Deep, slowed-down roar (sfx.play3d has no pitch control).
+func _roar(name: String, vol_db: float, pitch: float) -> void:
+	var p := AudioStreamPlayer3D.new()
+	p.stream = game.sfx.streams[name]
+	p.volume_db = vol_db
+	p.unit_size = 18.0
+	p.max_distance = 180.0
+	p.pitch_scale = pitch
+	game.sfx.add_child(p)
+	p.global_position = global_position + Vector3(0, 2.4, 0)
+	p.finished.connect(p.queue_free)
+	p.play()
+
+
+func _groan() -> void:
+	if boss:
+		_roar("zgroan%d" % (randi() % 5 + 1), 2.0, randf_range(0.5, 0.62))
+	else:
+		# each zombie has its own voice; the runners sound angrier and higher
+		game.sfx.play3d("zgroan%d" % (randi() % 8 + 1), global_position + Vector3(0, 1.5, 0), -6.0, voice_p * (1.08 if gait_kind == 2 else 1.0) * randf_range(0.96, 1.04))
+
+
+func _enrage() -> void:
+	if enraged:
+		return
+	enraged = true
+	roar_t = 1.4
+	if not remote:
+		speed = 4.0
+	_roar("zgroan1", 8.0, 0.55)
+	if game.player and is_instance_valid(game.player) and game.player.global_position.distance_to(global_position) < 25.0:
+		game.player.shake = maxf(game.player.shake, 0.35)
+
+
+## Ground slam: windup (z_scream), then dust + shake for everyone near, damage on the host.
+func _slam_tick(delta: float, apply_damage: bool) -> void:
+	if slam_t <= 0.0:
+		return
+	var before := slam_t
+	slam_t -= delta
+	if before > SLAM_HIT and slam_t <= SLAM_HIT:
+		var fp := global_position
+		game.fx.puff(fp + Vector3(0, 0.2, 0), Color(0.42, 0.37, 0.3), 3.5, 1.8, 0.5, 18, 0.9)
+		game.fx.puff(fp + Vector3(0, 0.1, 0), Color(0.3, 0.27, 0.22), 2.2, 1.2, 0.2, 10, 0.8)
+		game.sfx.play3d("boom", fp, 2.0)
+		_roar("zattack1", 4.0, 0.6)
+		var pl = game.player
+		if pl and is_instance_valid(pl):
+			var dl: float = pl.global_position.distance_to(fp)
+			if dl < 18.0:
+				pl.shake = maxf(pl.shake, clampf(1.0 - dl / 18.0, 0.0, 1.0) * 0.9)
+		if apply_damage:
+			if pl and is_instance_valid(pl) and pl.alive:
+				var d: float = pl.global_position.distance_to(fp)
+				if d < SLAM_R and absf(pl.global_position.y - fp.y) < 2.5:
+					game.damage_player(_slam_dmg(d), fp)
+			if game.net.is_coop():
+				for id in game.net.puppets:
+					var pp = game.net.puppets[id]
+					if is_instance_valid(pp) and not pp.dead:
+						var d2: float = pp.global_position.distance_to(fp)
+						if d2 < SLAM_R and absf(pp.global_position.y - fp.y) < 2.5:
+							game.net.zombie_hit(pp.peer_id, _slam_dmg(d2), fp)
+
+
+func _slam_dmg(d: float) -> float:
+	return lerpf(65.0, 12.0, clampf(d / SLAM_R, 0.0, 1.0))
+
+
+## Nuke power-up: heavy damage, never a kill on the boss.
+func nuke_damage() -> void:
+	if dead:
+		return
+	if not boss:
+		take_damage(1.0e7, false)
+		return
+	var d := minf(health - 1.0, max_health * 0.3)
+	if d > 0.0:
+		health -= d
+		hit_k = 0.3
+		if not enraged and health < max_health * 0.5:
+			_enrage()
 
 
 func _mat(arr_key: String) -> StandardMaterial3D:
@@ -229,7 +408,10 @@ func _mat(arr_key: String) -> StandardMaterial3D:
 
 
 func _build_skin() -> void:
-	R = RIG.make(self, RIG.ZOMBIES[randi() % RIG.ZOMBIES.size()])
+	if boss:
+		R = RIG.make(self, "zombi_soldado", Color(0.55, 0.3, 0.27))
+	else:
+		R = RIG.make(self, RIG.ZOMBIES[randi() % RIG.ZOMBIES.size()])
 	B.root = R.node
 	B.neck = RIG.bone_node(R, "mixamorig_Neck")
 	B.head = RIG.bone_node(R, "mixamorig_Head")
@@ -246,18 +428,23 @@ func _animate_skin(delta: float, moved: float) -> void:
 	hit_k = maxf(0.0, hit_k - delta * 4.0)
 	var clip := "z_idle"
 	var rate := 1.0
+	# a bigger body takes longer strides: drive the clip rate by speed in body lengths
+	var g_eff := gait / body_scale
 	if rise_t > 0.0:
 		clip = "z_scream"
+	elif slam_t > 0.0 or roar_t > 0.0:
+		clip = "z_scream"
+		rate = 1.5 if slam_t > 0.0 else 1.1
 	elif attack_t > 0.0:
 		clip = "z_attack"
-		rate = 1.6
+		rate = 1.6 * 0.7 / _atk_len()
 	elif gait > 0.25:
 		if gait_kind == 0:
 			clip = "z_walk"
-			rate = clampf(gait / 0.75, 0.6, 2.2)
+			rate = clampf(g_eff / 0.75, 0.6, 2.2)
 		else:
 			clip = "z_run"
-			rate = clampf(gait / 3.8, 0.65, 1.4)
+			rate = clampf(g_eff / 3.8, 0.65, 1.4)
 	if ap.current_animation != clip:
 		ap.play(clip, 0.2)
 	ap.speed_scale = rate
@@ -315,16 +502,19 @@ func take_damage(d: float, head: bool) -> bool:
 		return false
 	if remote:
 		# the host decides; show the flinch right away
-		hit_k = 1.0
+		hit_k = 0.3 if boss else 1.0
 		hit_dir = -1.0 if randf() < 0.5 else 1.0
 		game.net.zhit_send(nid, d, head)
 		return false
 	if game.zm and game.zm.insta_t > 0.0:
-		d = 99999.0
+		# Muerte instantánea doesn't one-shot the boss: each hit does at least 3% of its health
+		d = maxf(d, max_health * 0.03) if boss else 99999.0
 	health -= d
-	hit_k = 1.0
+	hit_k = 0.3 if boss else 1.0
 	hit_dir = -1.0 if randf() < 0.5 else 1.0
 	var killed := health <= 0.0
+	if boss and not killed and not enraged and health < max_health * 0.5:
+		_enrage()
 	if game.zm:
 		game.zm.on_hit(self, killed, head)
 	if killed:
@@ -353,7 +543,13 @@ func _die(head: bool) -> void:
 			(R.aim as RIG.Aim).head_off = true
 		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), Vector3.UP)
 		game.fx.blood(B.neck.global_position + Vector3(0, 0.1, 0), -transform.basis.z)
-	game.sfx.play3d("zdie%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -4.0)
+	game.sfx.play3d("zdie%d" % (randi() % 3 + 1), global_position + Vector3(0, 1.4, 0), -4.0, voice_p)
+	if boss:
+		slam_t = 0.0
+		roar_t = 0.0
+		_roar("zdie1", 8.0, 0.55)
+		game.ui.notice("JEFE ABATIDO", "El Coloso ha caído", 3.5)
+		_update_boss_fx()
 	if game.net.is_coop():
 		game.net.zdie(nid, head)
 	# kills by remote players are credited on their own machine (net.zpts)
@@ -367,9 +563,16 @@ func remote_die(head: bool) -> void:
 	_die(head)
 
 
-## Co-op host: packed animation state for the snapshot (bits 0-1 gait, 2 attacking, 3 rising).
+## Co-op host: packed animation state for the snapshot (bits 0-1 gait, 2 attacking, 3 rising,
+## 4 boss, 5 slamming, 6 enraged).
 func net_flags() -> int:
-	return gait_kind | (4 if attack_t > 0.0 else 0) | (8 if rise_t > 0.0 else 0)
+	return gait_kind | (4 if attack_t > 0.0 else 0) | (8 if rise_t > 0.0 else 0) | (16 if boss else 0) \
+		| (32 if slam_t > 0.0 else 0) | (64 if enraged else 0)
+
+
+## Swipe length (the boss swings slower).
+func _atk_len() -> float:
+	return 0.9 if boss else 0.7
 
 
 ## Co-op client: apply one snapshot entry.
@@ -380,9 +583,18 @@ func net_apply(pos: Vector3, fac: float, flags: int) -> void:
 	gait_kind = flags & 3
 	var atk := (flags & 4) != 0
 	if atk and not swipe_seen:
-		attack_t = 0.7
-		game.sfx.play3d("zattack%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -3.0)
+		attack_t = _atk_len()
+		game.sfx.play3d("zattack%d" % (randi() % 4 + 1), global_position + Vector3(0, 1.4, 0), -3.0, voice_p * randf_range(0.95, 1.05))
 	swipe_seen = atk
+	if boss:
+		var sl := (flags & 32) != 0
+		if sl and not slam_seen and slam_t <= 0.0:
+			# the snapshot arrives up to ~0.1 s late
+			slam_t = SLAM_T - 0.1
+			_roar("zgroan3", 5.0, 0.6)
+		slam_seen = sl
+		if (flags & 64) != 0 and not enraged:
+			_enrage()
 	if (flags & 8) == 0 and rise_t > 0.0:
 		rise_t = minf(rise_t, 0.2)
 
@@ -431,7 +643,38 @@ func _leg_pose(ph: float, g: float) -> void:
 	B.ftR.rotation.x = -(tr + kr) * 0.6
 
 
+## Close-up sounds: dragged feet / steps, raspy breathing near the player, the runners' shriek.
+func _sounds(delta: float, moved: float) -> void:
+	if dead or rise_t > 0.0:
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var d := cam.global_position.distance_to(global_position)
+	if gait_kind == 2 and not screamed and d < 40.0:
+		screamed = true
+		if randf() < 0.75:
+			game.sfx.play3d("zscream%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.5, 0), -1.0 if not boss else 3.0, voice_p * (0.6 if boss else 1.0))
+	if moved < 1.0:
+		foot_d += moved
+	var stride: float = 1.25 if gait_kind == 0 else 1.7
+	if foot_d >= stride:
+		foot_d = 0.0
+		if d < 22.0:
+			var fp := global_position + Vector3(0, 0.1, 0)
+			if gait_kind == 0 and randf() < 0.65:
+				game.sfx.play3d("zdrag%d" % (randi() % 3 + 1), fp, -12.0, randf_range(0.85, 1.1), 30.0)
+			else:
+				game.sfx.step(game.sfx.surface_at(global_position, game.map_idx), -11.0 + (3.0 if boss else 0.0), fp)
+	breath_t -= delta
+	if breath_t <= 0.0:
+		breath_t = randf_range(2.2, 4.0)
+		if d < 7.0 and attack_t <= 0.0:
+			game.sfx.play3d("zbreath%d" % (randi() % 3 + 1), global_position + Vector3(0, 1.55, 0), -9.0, voice_p * randf_range(0.95, 1.05), 20.0)
+
+
 func _animate(delta: float, moved: float) -> void:
+	_sounds(delta, moved)
 	if not R.is_empty():
 		_animate_skin(delta, moved)
 		return
@@ -453,11 +696,15 @@ func _animate(delta: float, moved: float) -> void:
 	var reach := -1.35 if gait_kind < 2 else -0.6
 	var at := 0.0
 	if attack_t > 0.0:
-		at = sin((1.0 - attack_t / 0.7) * PI)
+		at = sin((1.0 - attack_t / _atk_len()) * PI)
 	for sd in [-1, 1]:
 		var k := "L" if sd < 0 else "R"
 		var sw := sin(phase + (0.0 if sd < 0 else PI)) * (0.5 if gait_kind == 2 else 0.12) * g
 		var shx := reach + sw + sin(t * 2.3 + sd) * 0.08 - at * (1.0 if sd > 0 else 0.6)
+		if slam_t > SLAM_HIT or roar_t > 0.0:
+			shx = -2.9      # both fists up (slam windup / roar)
+		elif slam_t > 0.0:
+			shx = -0.7      # fists driven into the ground
 		# the body faces -Z: a negative X rotation would swing the arm behind the back, so the sign is flipped
 		B["sh" + k].rotation = Vector3(-shx, 0, -sd * (0.15 + at * 0.6))
 		B["el" + k].rotation.x = 0.35 + at * 0.5
@@ -484,10 +731,13 @@ func _death_anim() -> void:
 
 
 func _remote_process(delta: float) -> void:
+	_update_boss_fx()
 	if rise_t > 0.0:
+		if boss and rise_t >= 1.6:
+			_roar("zgroan1", 8.0, 0.5)
 		rise_t -= delta
 		var k := 1.0 - maxf(0.0, rise_t) / 1.6
-		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
+		B.root.position.y = -rise_depth * (1.0 - k * k * (3.0 - 2.0 * k))
 		_animate(delta, 0.0)
 		if R.is_empty():
 			B.shL.rotation.x = 2.6 - k * 1.2
@@ -504,10 +754,12 @@ func _remote_process(delta: float) -> void:
 	rotation.y = facing
 	if attack_t > 0.0:
 		attack_t -= delta
+	roar_t = maxf(0.0, roar_t - delta)
+	_slam_tick(delta, false)
 	groan_t -= delta
 	if groan_t <= 0.0:
 		groan_t = randf_range(3.0, 8.0)
-		game.sfx.play3d("zgroan%d" % (randi() % 5 + 1), global_position + Vector3(0, 1.5, 0), -6.0)
+		_groan()
 	var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
 	_animate(delta, moved)
 
@@ -525,14 +777,17 @@ func _physics_process(delta: float) -> void:
 	if remote:
 		_remote_process(delta)
 		return
+	_update_boss_fx()
 	if pl == null or not is_instance_valid(pl):
 		return
 	var pl_alive: bool = (not pl.dead) if pl.get("puppet") == true else pl.alive
 	# rising out of the ground
 	if rise_t > 0.0:
+		if boss and rise_t >= 1.6:
+			_roar("zgroan1", 8.0, 0.5)
 		rise_t -= delta
 		var k := 1.0 - maxf(0.0, rise_t) / 1.6
-		B.root.position.y = -1.75 * (1.0 - k * k * (3.0 - 2.0 * k))
+		B.root.position.y = -rise_depth * (1.0 - k * k * (3.0 - 2.0 * k))
 		B.root.rotation.z = sin(k * 9.0) * 0.12 * (1.0 - k)
 		_animate(delta, 0.0)
 		if R.is_empty():
@@ -551,21 +806,38 @@ func _physics_process(delta: float) -> void:
 	groan_t -= delta
 	if groan_t <= 0.0:
 		groan_t = randf_range(3.0, 8.0)
-		game.sfx.play3d("zgroan%d" % (randi() % 5 + 1), global_position + Vector3(0, 1.5, 0), -6.0)
+		_groan()
 	attack_cd -= delta
+	slam_cd -= delta
 	var mv := Vector3.ZERO
-	if attack_t > 0.0:
+	# swipe: the boss reaches further and hits harder
+	var reach_hit := 2.4 if boss else 1.7
+	var reach_go := 2.0 if boss else 1.3
+	var swipe_dmg := 70.0 if boss else 40.0
+	var hit_at := _atk_len() * 0.5
+	if roar_t > 0.0 or slam_t > 0.0:
+		# enrage roar / ground slam: plant the feet and face the target
+		roar_t = maxf(0.0, roar_t - delta)
+		_slam_tick(delta, true)
+		facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 3.0))
+	elif attack_t > 0.0:
 		attack_t -= delta
-		if attack_t <= 0.35 and attack_t + delta > 0.35 and dist < 1.7 and pl_alive:
+		if attack_t <= hit_at and attack_t + delta > hit_at and dist < reach_hit and pl_alive:
 			if pl.get("puppet") == true:
-				game.net.zombie_hit(pl.peer_id, 40.0, global_position)
+				game.net.zombie_hit(pl.peer_id, swipe_dmg, global_position)
 			else:
-				game.damage_player(40.0, global_position)
+				game.damage_player(swipe_dmg, global_position)
 		facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 6.0))
-	elif dist < 1.3 and pl_alive and attack_cd <= 0.0:
-		attack_t = 0.7
-		attack_cd = 1.1
-		game.sfx.play3d("zattack%d" % (randi() % 2 + 1), global_position + Vector3(0, 1.4, 0), -3.0)
+	elif boss and slam_cd <= 0.0 and dist < SLAM_R and pl_alive:
+		slam_t = SLAM_T
+		slam_cd = randf_range(6.0, 9.0) * (0.75 if enraged else 1.0)
+		_roar("zgroan3", 5.0, 0.6)
+	elif dist < reach_go and pl_alive and attack_cd <= 0.0:
+		attack_t = _atk_len()
+		attack_cd = 1.3 if boss else 1.1
+		game.sfx.play3d("zattack%d" % (randi() % 4 + 1), global_position + Vector3(0, 1.4, 0), -3.0, voice_p * randf_range(0.95, 1.05))
+		if boss:
+			_roar("zattack%d" % (randi() % 2 + 1), 2.0, 0.65)
 	else:
 		repath_t -= delta
 		if dist < 5.0:
@@ -591,7 +863,7 @@ func _physics_process(delta: float) -> void:
 			if l < 0.75 and l > 0.001:
 				mv += d / l * (0.75 - l) * 2.0
 	var spd := speed * (1.0 - hit_k * 0.5)
-	if mv.length() > 0.01 and attack_t <= 0.0:
+	if mv.length() > 0.01 and attack_t <= 0.0 and slam_t <= 0.0 and roar_t <= 0.0:
 		mv = mv.normalized()
 		velocity.x = mv.x * spd
 		velocity.z = mv.z * spd

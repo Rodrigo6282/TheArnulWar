@@ -4,7 +4,10 @@ extends RefCounted
 
 static var H := 60.0
 const SHP := preload("res://scripts/shapes.gd")
+const GLASS := preload("res://scripts/glass.gd")
 static var rects: Array = []      # [minx, minz, maxx, maxz, top] of every solid, for placement checks
+static var door_pts: Array = []    # ground-floor door centres (Vector2 x,z): extra props keep clear of them
+static var rooms: Array = []      # building footprints [minx, minz, maxx, maxz]: no extra props inside
 static var _mats := {}
 static var rng := RandomNumberGenerator.new()
 
@@ -33,6 +36,7 @@ static func pbr(id: String, tint := Color.WHITE, scale := 0.5, metal := 0.0, wor
 	m.set_shader_parameter("metal", metal)
 	m.set_shader_parameter("world_tri", world_tri)
 	m.set_shader_parameter("porosity", 0.15 if id.begins_with("snow") else (1.0 - metal * 0.9))
+	m.set_meta("tex", id)   # footstep surface (sfx.surface_at)
 	_mats[key] = m
 	return m
 
@@ -55,6 +59,7 @@ static func pbr_std(id: String, tint := Color.WHITE, scale := 0.5, metal := 0.0,
 	m.uv1_world_triplanar = world_tri
 	m.uv1_scale = Vector3.ONE * scale
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	m.set_meta("tex", id)
 	_mats[key] = m
 	return m
 
@@ -193,6 +198,7 @@ static func prop(parent: Node3D, id: String, x: float, z: float, rot := 0.0, s :
 		var size := box.size * s
 		var c := (box.position + box.size * 0.5) * s
 		var sb := StaticBody3D.new()
+		sb.set_meta("tex", id)   # footstep surface (crates sound like wood, barrels like metal...)
 		sb.rotation.y = rot
 		sb.position = Vector3(x, y0 - box.position.y * s, z) + Basis(Vector3.UP, rot) * c
 		var cs := CollisionShape3D.new()
@@ -219,7 +225,14 @@ static func collider_only(parent: Node3D, c: Vector3, size: Vector3) -> void:
 	rects.append([c.x - size.x * 0.5, c.z - size.z * 0.5, c.x + size.x * 0.5, c.z + size.z * 0.5, c.y + size.y * 0.5])
 
 
+## Ground overlays without collider (roads, sidewalks, grass patches): [x0, z0, x1, z1, y, tex] for
+## the footstep surface (sfx.surface_at). Filled while a map is built.
+static var ground_tags: Array = []
+
+
 static func flat(parent: Node3D, c: Vector3, size: Vector2, mat: Material) -> void:
+	if c.y > 0.004 and c.y < 0.2 and size.x < 300.0 and mat != null and mat.has_meta("tex"):
+		ground_tags.append([c.x - size.x * 0.5, c.z - size.y * 0.5, c.x + size.x * 0.5, c.z + size.y * 0.5, c.y, str(mat.get_meta("tex"))])
 	var pm := PlaneMesh.new()
 	pm.size = size
 	# flat planes don't need triplanar mapping: same texel density with plain UVs = 1/3 of the samples
@@ -269,10 +282,26 @@ static func wall_gaps(p: Node3D, a0: float, a1: float, fixed: float, axis: Strin
 			blk(p, fixed, y0 + y, (s + e) * 0.5, t, hh, e - s, mat)
 	for g in gaps:
 		var gw: float = 2.4 if g[1] == "d" else 1.6
+		if g[1] == "d" and y0 < 0.5:
+			door_pts.append(Vector2(g[0], fixed) if axis == "x" else Vector2(fixed, g[0]))
 		seg.call(cur, g[0] - gw * 0.5, 0.0, h)
 		if g[1] == "w":
 			seg.call(g[0] - gw * 0.5, g[0] + gw * 0.5, 0.0, 1.1)
 			seg.call(g[0] - gw * 0.5, g[0] + gw * 0.5, 2.2, h - 2.2)
+			# stone sill + lintel (batched decoration, no collider)
+			var gx: float = g[0]
+			if axis == "x":
+				_trim_box(Vector3(gx, y0 + 1.1, fixed), Vector3(gw + 0.3, 0.08, t + 0.16))
+				_trim_box(Vector3(gx, y0 + 2.26, fixed), Vector3(gw + 0.2, 0.12, t + 0.1))
+				for sx in [-1.0, 1.0]:
+					_trim_box(Vector3(gx + sx * (gw * 0.5 - 0.035), y0 + 1.65, fixed), Vector3(0.07, 1.1, 0.12))
+				_glass_panes.append(Transform3D(Basis(Vector3.RIGHT * (gw - 0.12), Vector3.UP * 1.06, Vector3.BACK), Vector3(gx, y0 + 1.66, fixed)))
+			else:
+				_trim_box(Vector3(fixed, y0 + 1.1, gx), Vector3(t + 0.16, 0.08, gw + 0.3))
+				_trim_box(Vector3(fixed, y0 + 2.26, gx), Vector3(t + 0.1, 0.12, gw + 0.2))
+				for sx in [-1.0, 1.0]:
+					_trim_box(Vector3(fixed, y0 + 1.65, gx + sx * (gw * 0.5 - 0.035)), Vector3(0.12, 1.1, 0.07))
+				_glass_panes.append(Transform3D(Basis(Vector3.BACK * (gw - 0.12), Vector3.UP * 1.06, Vector3.LEFT), Vector3(fixed, y0 + 1.66, gx)))
 		else:
 			seg.call(g[0] - gw * 0.5, g[0] + gw * 0.5, 2.7, h - 2.7)
 		cur = g[0] + gw * 0.5
@@ -285,6 +314,7 @@ static func building(p: Node3D, cx: float, cz: float, w: float, d: float, h: flo
 	var x1 := cx + w * 0.5
 	var z0 := cz - d * 0.5
 	var z1 := cz + d * 0.5
+	rooms.append([x0, z0, x1, z1])
 	var conv := func(arr, c):
 		var out := []
 		for o in arr:
@@ -314,6 +344,7 @@ static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: D
 	var x1 := cx + w * 0.5
 	var z0 := cz - d * 0.5
 	var z1 := cz + d * 0.5
+	rooms.append([x0, z0, x1, z1])
 	var conv := func(arr, c):
 		var out := []
 		for o in arr:
@@ -401,6 +432,221 @@ static func house2(p: Node3D, cx: float, cz: float, w: float, d: float, doors: D
 		lamp_light(p, Vector3(cx + 2.0, fy + h2 * 0.75, cz + 1.0), Color(1.0, 0.7, 0.42), 1.4, maxf(w, d) * 0.8)
 	furnish(p, ix0, iz0, ix1, iz1, 0.0, true)
 	furnish(p, ix0, iz0, ix1, iz1, fy, true)
+
+
+## Tall block you can enter: the two lower storeys are a house2 (doors, stairs, furnished rooms,
+## breakable glass), the storeys above are solid with glazed facades (`fsides`) up to height h.
+static func tower(p: Node3D, cx: float, cz: float, w: float, d: float, h: float, doors: Dictionary, wins: Dictionary,
+		mat: Material, trim: Material, roofm: Material, floor_m: Material, fsides := "nsew") -> void:
+	house2(p, cx, cz, w, d, doors, wins, mat, trim, roofm, floor_m)
+	_guard(cx - w * 0.5, cz - d * 0.5, cx + w * 0.5, cz + d * 0.5)
+	var base := 3.4 + 0.25 + 3.0 + 0.25
+	if h - base > 1.2:
+		blk(p, cx, base, cz, w, h - base, d, mat, true, 0.0)
+		rects.pop_back()
+		blk(p, cx, h, cz, w + 0.3, 0.3, d + 0.3, trim, false)
+		facade(cx, cz, w, d, base, h, fsides)
+
+
+## Free rectangle check for extra buildings: no solid, room, door, spawn or start spot within margin.
+static func _lot_free(i: int, x0: float, z0: float, x1: float, z1: float, margin: float) -> bool:
+	var half: float = ZH if MAPS[i].mode == "zombies" else H
+	if x0 - margin < -half + 1.5 or x1 + margin > half - 1.5 or z0 - margin < -half + 1.5 or z1 + margin > half - 1.5:
+		return false
+	for q in rects:
+		if x1 + margin > q[0] and x0 - margin < q[2] and z1 + margin > q[1] and z0 - margin < q[3]:
+			return false
+	for q in rooms:
+		if x1 + margin > q[0] and x0 - margin < q[2] and z1 + margin > q[1] and z0 - margin < q[3]:
+			return false
+	for dp in door_pts:
+		if dp.x > x0 - margin - 1.5 and dp.x < x1 + margin + 1.5 and dp.y > z0 - margin - 1.5 and dp.y < z1 + margin + 1.5:
+			return false
+	var st: Vector3 = MAPS[i].start
+	if st.x > x0 - 8.0 and st.x < x1 + 8.0 and st.z > z0 - 8.0 and st.z < z1 + 8.0:
+		return false
+	# zombie maps: never in the start courtyard
+	if MAPS[i].mode == "zombies" and x1 > -14.0 and x0 < 14.0 and z1 > -14.0 and z0 < 14.0:
+		return false
+	return true
+
+
+## Extra enterable buildings on every map: tries sizes on random lots and keeps the ones that fit
+## with a 3 m street all around (nav agents and zombies still get past). Doors face the open sides,
+## windows get breakable glass, rooms are furnished.
+static func extra_buildings(root: Node3D, i: int, n: int) -> void:
+	var walls: Array
+	var trim: Material
+	var roofm: Material
+	match i:
+		1:
+			walls = [pbr("patterned_clay_plaster", Color(1.0, 0.88, 0.72), 0.4), pbr("white_stucco", Color(0.95, 0.82, 0.66), 0.4)]
+			trim = pbr("clay_plaster", Color(0.62, 0.48, 0.36), 0.5)
+			roofm = trim
+		2, 5:
+			walls = [pbr("concrete_block_wall", Color(0.78, 0.74, 0.68)), pbr("metal_plate", Color(0.62, 0.66, 0.7), 0.35, 0.6)]
+			trim = pbr("concrete_floor_01", Color(0.62, 0.64, 0.68), 0.3)
+			roofm = pbr("corrugated_iron_02", Color(0.55, 0.57, 0.58), 0.38, 0.45)
+		6:
+			# crypts / caretaker huts in the same stone as the mausoleums
+			walls = [pbr("concrete_block_wall", Color(0.55, 0.55, 0.52)), pbr("chipped_concrete", Color(0.58, 0.57, 0.55), 0.6)]
+			trim = pbr("chipped_concrete", Color(0.62, 0.62, 0.6), 1.2, 0.0, false)
+			roofm = pbr("clay_roof_tiles_02", Color(0.55, 0.5, 0.5), 0.5)
+		3:
+			walls = [pbr("brick_wall_001"), pbr("white_stucco", Color(0.8, 0.76, 0.7), 0.4)]
+			trim = pbr("chipped_concrete", Color(0.6, 0.6, 0.6), 0.33)
+			roofm = pbr("concrete_floor_01", Color(0.5, 0.5, 0.5), 0.5)
+		4:
+			walls = [pbr("concrete_block_wall", Color(0.7, 0.7, 0.72)), pbr("corrugated_iron_02", Color(0.45, 0.5, 0.42), 0.38, 0.45)]
+			trim = pbr("chipped_concrete", Color(0.55, 0.56, 0.58), 0.33)
+			roofm = pbr("corrugated_iron_02", Color(0.5, 0.5, 0.5), 0.38, 0.45)
+		_:
+			walls = [pbr("concrete_block_wall", Color(0.92, 0.9, 0.86)), pbr("brick_wall_001")]
+			trim = pbr("chipped_concrete", Color(0.68, 0.7, 0.72), 0.33)
+			roofm = pbr("concrete_floor_01", Color(0.55, 0.55, 0.56), 0.5)
+	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
+	var zmap: bool = MAPS[i].mode == "zombies"
+	var half: float = ZH if zmap else H
+	var sizes := [[12.0, 9.0, true], [10.0, 8.0, true], [9.0, 7.0, false], [8.0, 6.0, false], [7.0, 6.0, false], [6.0, 5.0, false]]
+	# second pass: small buildings (kiosks, sheds, huts, crypts) for the gaps the big ones can't use
+	var small := [[6.0, 5.0, false], [5.0, 4.5, false], [5.0, 4.0, false], [4.5, 4.0, false]]
+	if zmap:
+		sizes = [[8.0, 6.0, false], [7.0, 6.0, false], [6.0, 5.0, false], [5.0, 4.5, false], [4.5, 4.0, false]]
+		small = [[4.5, 4.0, false], [4.0, 4.0, false], [4.0, 3.5, false]]
+	var placed := 0
+	for t in 1600:
+		if placed >= n:
+			break
+		var small_phase := t >= 700
+		var sz: Array = (small if small_phase else sizes)[rng.randi() % (small.size() if small_phase else sizes.size())]
+		var w: float = sz[0]
+		var d: float = sz[1]
+		if rng.randf() < 0.5:
+			var tmp := w
+			w = d
+			d = tmp
+		var cx: float = snappedf(rng.randf_range(-half + 4, half - 4), 0.5)
+		var cz: float = snappedf(rng.randf_range(-half + 4, half - 4), 0.5)
+		var x0 := cx - w * 0.5
+		var z0 := cz - d * 0.5
+		var x1 := cx + w * 0.5
+		var z1 := cz + d * 0.5
+		if not _lot_free(i, x0, z0, x1, z1, (2.2 if small_phase else 2.5) if zmap else (2.6 if small_phase else 3.0)):
+			continue
+		placed += 1
+		if small_phase and _small_building(root, i, cx, cz, w, d, walls, trim, roofm):
+			_guard(x0, z0, x1, z1)
+			continue
+		var m: Material = walls[rng.randi() % walls.size()]
+		var two: bool = sz[2] and w >= 9.0 and not zmap
+		# doors on two sides (never on the north wall of a two-storey house: the stairs run along it)
+		var sides := ["s", "e", "w"] if two else ["n", "s", "e", "w"]
+		for a in range(sides.size() - 1, 0, -1):   # seeded shuffle (Array.shuffle uses the global rng)
+			var b := rng.randi() % (a + 1)
+			var tmp2 = sides[a]
+			sides[a] = sides[b]
+			sides[b] = tmp2
+		var doors := {}
+		var wins := {}
+		for s in ["n", "s", "e", "w"]:
+			var ln: float = w if s in ["n", "s"] else d
+			if s in sides.slice(0, 2):
+				var off: float = 0.0 if ln < 8.0 else rng.randf_range(-1.5, 1.5)
+				if two and s == "n":
+					off = ln * 0.5 - 2.0
+				var arr := [[off, "d"]]
+				if ln >= 9.0:
+					arr.append([off + (3.0 if off < 0 else -3.0), "w"])
+				doors[s] = arr
+			else:
+				var arr2 := []
+				var nw := int(ln / 3.5)
+				for k in nw:
+					arr2.append([(k - (nw - 1) * 0.5) * 3.2, "w"])
+				if two and s == "n":
+					arr2 = [[ln * 0.5 - 2.0, "w"]]
+				doors[s] = arr2
+			var u := []
+			var nu := int(ln / 3.5)
+			for k in nu:
+				u.append([(k - (nu - 1) * 0.5) * 3.2, "w"])
+			if two and s == "n":
+				u = [[ln * 0.5 - 2.0, "w"]]
+			wins[s] = u
+		if two:
+			house2(root, cx, cz, w, d, doors, wins, m, trim, roofm, planks)
+		else:
+			var hh: float = rng.randf_range(3.4, 4.2)
+			building(root, cx, cz, w, d, hh, doors, m, trim)
+			roof(root, cx, cz, w, d, hh, roofm)
+			if w >= 6.0 and d >= 6.0:
+				furnish(root, x0 + 0.2, z0 + 0.2, x1 - 0.2, z1 - 0.2, 0.0)
+		_guard(x0, z0, x1, z1)
+	if "--buildinfo" in OS.get_cmdline_user_args():
+		print("EXTRA map %d: %d/%d edificios rects=%d rooms=%d doors=%d H=%.0f" % [i, placed, n, rects.size(), rooms.size(), door_pts.size(), H])
+
+
+## Map-specific small buildings for the second pass of extra_buildings(). Returns false when the
+## map has no special style (the caller then builds a plain one-room building).
+static func _small_building(root: Node3D, i: int, cx: float, cz: float, w: float, d: float, walls: Array, trim: Material, roofm: Material) -> bool:
+	var m: Material = walls[rng.randi() % walls.size()]
+	var x0 := cx - w * 0.5
+	var z0 := cz - d * 0.5
+	var long_x := w >= d
+	var door_side: String = ["n", "s", "e", "w"][rng.randi() % 4]
+	var win_side: String = {"n": "s", "s": "n", "e": "w", "w": "e"}[door_side]
+	var doors := {door_side: [[0.0, "d"]], win_side: [[0.0, "w"]]}
+	match i:
+		0:
+			# bombed-out shell: low broken walls, no roof, rubble inside
+			if rng.randf() < 0.55:
+				var hh := rng.randf_range(2.0, 2.9)
+				var side2: String = ["n", "s", "e", "w"][rng.randi() % 4]
+				if side2 != door_side:
+					doors[side2] = [[0.0, "d"]]
+				building(root, cx, cz, w, d, hh, doors, m, trim)
+				# a few broken wall stubs on top so the edge isn't straight
+				for k in 4:
+					var along := rng.randf_range(-0.4, 0.4)
+					var on_x := rng.randf() < 0.5
+					var px := cx + (along * w if on_x else (w * 0.5 if rng.randf() < 0.5 else -w * 0.5))
+					var pz := cz + ((d * 0.5 if rng.randf() < 0.5 else -d * 0.5) if on_x else along * d)
+					blk(root, px, hh, pz, (rng.randf_range(0.6, 1.6) if on_x else 0.4), rng.randf_range(0.3, 1.1), (0.4 if on_x else rng.randf_range(0.6, 1.6)), m, false)
+				rubble_pile(root, cx + rng.randf_range(-0.6, 0.6), cz + rng.randf_range(-0.6, 0.6), 0.8)
+				return true
+		1:
+			# adobe hut: flat roof with a low parapet and a few roof beams sticking out
+			var hh := rng.randf_range(2.9, 3.4)
+			building(root, cx, cz, w, d, hh, doors, m, trim)
+			roof(root, cx, cz, w, d, hh, roofm)
+			var top := hh + 0.38
+			for sd in [[cx, z0 + 0.1, w + 0.6, 0.3], [cx, z0 + d - 0.1, w + 0.6, 0.3], [x0 + 0.1, cz, 0.3, d + 0.6], [x0 + w - 0.1, cz, 0.3, d + 0.6]]:
+				blk(root, sd[0], top - 0.05, sd[1], sd[2], 0.4, sd[3], m, false)
+			var beam := pbr("brown_planks_04", Color(0.6, 0.5, 0.4), 0.8)
+			for k in 3:
+				var bz := z0 + d * (k + 1) / 4.0
+				blk(root, x0 - 0.3, hh - 0.25, bz, 0.6, 0.14, 0.14, beam, false)
+			return true
+		5:
+			# arctic: half of them are corrugated quonset huts (solid, snow on top)
+			if rng.randf() < 0.5:
+				var metal := pbr("corrugated_iron_02", Color(0.48, 0.52, 0.46), 0.38, 0.45)
+				quonset(root, cx, cz, maxf(w, d), minf(w, d) * 0.5, long_x, metal, trim)
+				rects.append([x0, z0, x0 + w, z0 + d, minf(w, d) * 0.5])
+				return true
+		6:
+			# crypt: one door, low pitched-looking roof (stacked slabs) and a lantern
+			building(root, cx, cz, w, d, 3.0, {door_side: [[0.0, "d"]]}, m, trim)
+			roof(root, cx, cz, w, d, 3.0, roofm)
+			blk(root, cx, 3.38, cz, w * 0.7, 0.3, d * 0.7, roofm, false)
+			blk(root, cx, 3.68, cz, w * 0.4, 0.25, d * 0.4, roofm, false)
+			lamp_light(root, Vector3(cx, 1.2, cz), Color(1.0, 0.55, 0.25), 1.2, 4.5)
+			return true
+	# sheds / garages / kiosks for the other maps
+	var hh2 := rng.randf_range(2.9, 3.4)
+	building(root, cx, cz, w, d, hh2, doors, m, trim)
+	roof(root, cx, cz, w, d, hh2, roofm)
+	return true
 
 
 ## Prop placed by the centre of its bounds (so it can be lined up against walls).
@@ -812,6 +1058,7 @@ static func build_city(root: Node3D) -> Array:
 		var h := rng.randf_range(12, 45)
 		var d := rng.randf_range(10, 25)
 		blk(root, cos(a) * r, 0, sin(a) * r, w, h, d, dark, false)
+		facade_far(cos(a) * r, sin(a) * r, w, d, h)
 	# buildings
 	# two-storey houses (stairs inside) and roofed single-storey ones, all furnished
 	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
@@ -827,10 +1074,36 @@ static func build_city(root: Node3D) -> Array:
 	furnish(root, -36.8, 25.2, -19.2, 34.8, 0.0)
 	house2(root, 32, 32, 12, 16, {"w": [[-3, "d"]], "n": [[3.5, "d"]], "s": [[0, "w"]], "e": [[2, "w"]]},
 		{"n": [[3, "w"]], "s": [[0, "w"]], "e": [[-3, "w"], [3, "w"]], "w": [[2, "w"]]}, brick, dark, roof_m, planks)
-	blk(root, 0, 0, -45, 20, 10, 8, dark, true, 0.3)
-	blk(root, -50, 0, 0, 8, 8, 20, dark, true, 0.3)
-	blk(root, 50, 0, 0, 8, 9, 18, dark, true, 0.3)
-	blk(root, 0, 0, 47, 14, 7, 6, dark, true, 0.3)
+	# the big blocks along the streets: enterable (two storeys with stairs, breakable glass), solid
+	# glazed storeys above
+	tower(root, 0, -45, 20, 8, 10, {"s": [[-5, "d"], [0, "w"], [5, "d"]], "e": [[0, "w"]], "w": [[0, "d"]], "n": [[6, "w"]]},
+		{"s": [[-7, "w"], [-3.5, "w"], [0, "w"], [3.5, "w"], [7, "w"]], "e": [[0, "w"]], "w": [[0, "w"]], "n": [[6, "w"]]}, dark, wall, roof_m, planks, "swe")
+	tower(root, -50, 0, 8, 20, 8, {"e": [[-5, "d"], [0, "w"], [5, "d"]], "s": [[0, "w"]], "n": [[2, "w"]]},
+		{"e": [[-6.5, "w"], [-2, "w"], [2, "w"], [6.5, "w"]], "s": [[0, "w"]], "n": [[2, "w"]]}, dark, wall, roof_m, planks, "ens")
+	tower(root, 50, 0, 8, 18, 9, {"w": [[-4, "d"], [0, "w"], [4, "d"]], "s": [[0, "w"]], "n": [[2, "w"]]},
+		{"w": [[-6, "w"], [-2, "w"], [2, "w"], [6, "w"]], "s": [[0, "w"]], "n": [[2, "w"]]}, dark, wall, roof_m, planks, "wns")
+	tower(root, 0, 47, 14, 6, 7, {"n": [[4, "d"], [-4.5, "w"]], "e": [[0, "w"]], "w": [[0, "d"]]},
+		{"n": [[4, "w"]], "e": [[0, "w"]], "w": [[0, "w"]], "s": [[-3, "w"], [3, "w"]]}, dark, wall, roof_m, planks, "nwe")
+	# more blocks: a two-storey brick house (NE), apartment blocks (NW), enterable shops
+	house2(root, 31, -46, 16, 9, {"s": [[-4, "d"], [3, "w"]], "e": [[0, "d"]], "n": [[4, "w"]], "w": [[1.5, "w"]]},
+		{"n": [[4, "w"]], "s": [[-4, "w"], [0, "w"], [4, "w"]], "e": [[0, "w"]], "w": [[1.5, "w"]]}, brick, dark, roof_m, planks)
+	_guard(23, -50.5, 39, -41.5)
+	tower(root, -48, -38, 9, 12, 12, {"e": [[-3, "d"], [2.5, "w"]], "s": [[0, "d"]], "w": [[0, "w"]], "n": [[2.5, "w"]]},
+		{"e": [[-3.5, "w"], [0, "w"], [3.5, "w"]], "s": [[0, "w"]], "w": [[-3, "w"], [3, "w"]], "n": [[2.5, "w"]]}, brick, dark, roof_m, planks)
+	tower(root, -34, -48, 12, 6, 9, {"s": [[-3, "d"], [2.5, "w"]], "e": [[0, "d"]], "n": [[4, "w"]]},
+		{"s": [[-4, "w"], [0, "w"], [4, "w"]], "e": [[0, "w"]], "w": [[0, "w"]], "n": [[4, "w"]]}, wall, dark, roof_m, planks)
+	for b in [[47, 37, 8, 14, 4.5, {"w": [[-3, "d"]], "s": [[0, "d"]], "e": [[-3, "w"], [3, "w"]], "n": [[0, "w"]]}, brick],
+			[-15, 48, 9, 7, 4.0, {"n": [[-1.5, "d"]], "e": [[0, "d"]], "w": [[0, "w"]], "s": [[-2, "w"], [2, "w"]]}, wall],
+			[32, 2, 10, 7, 4.2, {"w": [[0, "d"]], "n": [[-2.5, "w"], [2.5, "w"]], "s": [[-2, "d"], [2.5, "w"]], "e": [[0, "w"]]}, wall],
+			[-30, 1, 10, 7, 4.2, {"e": [[0, "d"]], "s": [[1.0, "d"], [-3.0, "w"]], "n": [[-2.5, "w"], [2.5, "w"]], "w": [[0, "w"]]}, brick]]:
+		var bx0: float = b[0] - b[2] * 0.5
+		var bz0: float = b[1] - b[3] * 0.5
+		var bx1: float = b[0] + b[2] * 0.5
+		var bz1: float = b[1] + b[3] * 0.5
+		building(root, b[0], b[1], b[2], b[3], b[4], b[5], b[6], dark)
+		roof(root, b[0], b[1], b[2], b[3], b[4], roof_m)
+		furnish(root, bx0 + 0.2, bz0 + 0.2, bx1 - 0.2, bz1 - 0.2, 0.0)
+		_guard(bx0, bz0, bx1, bz1)
 	blk(root, 0, 0, 0, 4, 1, 4, wall, true, 0.12)
 	blk(root, 0, 1, 0, 1.4, 3.5, 1.4, wall, true, 0.15)
 	# containers
@@ -952,10 +1225,21 @@ static var zlayout := {}
 
 static func build(i: int, root: Node3D, names := {}) -> Array:
 	rects.clear()
+	door_pts.clear()
+	rooms.clear()
+	ground_tags.clear()
 	_xb_count = 0
 	zlayout = {}
 	H = 60.0
 	night = ENVS[MAPS[i].env].night
+	_win_glass.clear()
+	_win_lit.clear()
+	_win_trim.clear()
+	_glass_panes.clear()
+	_bg.clear()
+	_wrng.seed = 777 + i
+	trim_col = [Color(0.66, 0.64, 0.6), Color(0.78, 0.66, 0.52), Color(0.7, 0.72, 0.76), Color(0.6, 0.58, 0.55),
+		Color(0.55, 0.56, 0.58), Color(0.62, 0.64, 0.68), Color(0.5, 0.5, 0.48)][i % 7]
 	var sp: Array
 	match i:
 		0:
@@ -979,6 +1263,10 @@ static func build(i: int, root: Node3D, names := {}) -> Array:
 			for p in zlayout.spawns[zid]:
 				reserve(p.x, p.z, 1.0)
 	rng.seed = 31337 + i
+	# extra enterable buildings on free lots (every map)
+	if "--buildinfo" in OS.get_cmdline_user_args():
+		print("PRE map %d rects=%d rooms=%d doors=%d rng=%d" % [i, rects.size(), rooms.size(), door_pts.size(), rng.state])
+	extra_buildings(root, i, int(_arg("--extra", str([8, 9, 10, 6, 6, 7, 6][i]))))
 	if not ("--nodress" in OS.get_cmdline_user_args()):
 		dress(root, i)
 	# wet streets on the temperate maps, and contact shadows under everything
@@ -996,11 +1284,33 @@ static func build(i: int, root: Node3D, names := {}) -> Array:
 		for q in [[-7.5, -7.5], [7.5, 7.5], [-30, -20], [30, -22], [24, 24], [-24, 22], [-30, 4], [30, -4], [0, -24], [0, 24]]:
 			fire_barrel(root, q[0], q[1], fl)
 		root.set_meta("fires", fl)
+	# extra lived-in dressing (after the fire barrels so it never takes their spots)
+	if not ("--nodress" in OS.get_cmdline_user_args() or "--noamb" in OS.get_cmdline_user_args()):
+		ambience(root, i)
+		extra_props(root, i)
 	contact_shadows(root)
+	_flush_windows(root)
+	if "--buildinfo" in OS.get_cmdline_user_args() and zlayout.has("perks"):
+		for pk in zlayout.perks:
+			var q: Vector3 = pk.pos
+			for r in rects:
+				if r.size() > 4 and float(r[4]) > 0.0 and q.x > r[0] - 0.6 and q.x < r[2] + 0.6 and q.z > r[1] - 0.6 and q.z < r[3] + 0.6:
+					print("PERK BLOCKED map %d %s at %s by %s" % [i, pk.kind, q, r])
+			for r in rooms:
+				if q.x > r[0] and q.x < r[2] and q.z > r[1] and q.z < r[3]:
+					print("PERK INSIDE ROOM map %d %s %s" % [i, pk.kind, r])
 	return sp
 
 
 # ---------------------------------------------------------------- shared helpers
+## Dev argument value ("--k=v"), or the default.
+static func _arg(k: String, d: String) -> String:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with(k + "="):
+			return a.get_slice("=", 1)
+	return d
+
+
 static func ground_plane(root: Node3D, mat: Material, cz := 0.0, sz := 400.0) -> void:
 	var g := StaticBody3D.new()
 	root.add_child(g)
@@ -1260,6 +1570,157 @@ static func roof(root: Node3D, cx: float, cz: float, w: float, d: float, h: floa
 	blk(root, cx, h + 0.16, cz, w + 0.6, 0.22, d + 0.6, mat, false)
 
 
+## ---------------------------------------------------------------- windows
+## Glazing on solid facades, window sills / lintels and lit windows are only decoration: they are
+## collected here while a map is built and drawn as a few MultiMeshes (one draw call each, no
+## shadows, no colliders) by _flush_windows() at the end of build().
+static var trim_col := Color(0.62, 0.6, 0.56)
+static var _win_glass: Array = []   # [Transform3D, Color] unit quads facing +Z
+static var _win_lit: Array = []     # [Transform3D, Color] lit (unshaded, HDR colour -> glow)
+static var _win_trim: Array = []    # [Transform3D, Color] unit boxes
+static var _glass_list_debug: Array = []   # copy of the last map's panes (tests)
+static var _glass_panes: Array = [] # [Transform3D] breakable panes in real window openings (scripts/glass.gd)
+static var _wrng := RandomNumberGenerator.new()   # own rng: windows never shift the map layout
+static var _bg: Array = []          # footprints of background buildings outside the walls [x0, z0, x1, z1]
+
+
+static func _trim_box(c: Vector3, size: Vector3) -> void:
+	_win_trim.append([Transform3D(Basis.from_scale(size), c), trim_col])
+
+
+## Window panes on the outside of a solid box (centre cx/cz, size w x d) for rows between heights
+## ya and yb, on the given sides ("nsew"). lit_p = chance of a lit window (night maps).
+static func facade(cx: float, cz: float, w: float, d: float, ya: float, yb: float, sides := "nsew", col_w := 3.2, fh := 3.3,
+		trims := true, lit_p := 0.0, pw := 1.2, ph := 1.5, sill := 0.9) -> void:
+	var faces := []
+	if "n" in sides:
+		faces.append([Vector3(cx, 0, cz - d * 0.5), Vector3.FORWARD, w])
+	if "s" in sides:
+		faces.append([Vector3(cx, 0, cz + d * 0.5), Vector3.BACK, w])
+	if "w" in sides:
+		faces.append([Vector3(cx - w * 0.5, 0, cz), Vector3.LEFT, d])
+	if "e" in sides:
+		faces.append([Vector3(cx + w * 0.5, 0, cz), Vector3.RIGHT, d])
+	var rows := int(floor((yb - 0.3 - ya - sill - ph) / fh)) + 1
+	if rows < 1:
+		return
+	for f in faces:
+		var ln: float = f[2]
+		var n := int(floor((ln - 0.4) / col_w))
+		if n < 1:
+			continue
+		var nrm: Vector3 = f[1]
+		var xa := Vector3.UP.cross(nrm)
+		for r in rows:
+			var by := ya + r * fh + sill
+			for k in n:
+				var off := (k - (n - 1) * 0.5) * col_w
+				var c: Vector3 = f[0] + xa * off + nrm * 0.03 + Vector3(0, by + ph * 0.5, 0)
+				var xf := Transform3D(Basis(xa * pw, Vector3.UP * ph, nrm), c)
+				if lit_p > 0.0 and _wrng.randf() < lit_p:
+					var e := _wrng.randf_range(0.5, 1.0)
+					_win_lit.append([xf, Color(2.4 * e, 1.55 * e, 0.75 * e)])
+				else:
+					var s := _wrng.randf_range(0.7, 1.25)
+					var gc := Color(0.09 * s, 0.115 * s, 0.15 * s)
+					if _wrng.randf() < 0.12:
+						gc = Color(0.2, 0.16, 0.12) * s   # drawn curtain
+					_win_glass.append([xf, gc])
+				if trims:
+					_win_trim.append([Transform3D(Basis(xa * (pw + 0.3), Vector3.UP * 0.09, nrm * 0.2), f[0] + xa * off + nrm * 0.1 + Vector3(0, by - 0.045, 0)), trim_col])
+					_win_trim.append([Transform3D(Basis(xa * (pw + 0.2), Vector3.UP * 0.12, nrm * 0.1), f[0] + xa * off + nrm * 0.05 + Vector3(0, by + ph + 0.06, 0)), trim_col])
+
+
+## Distant skyline block: window grid on the faces that can be seen from inside the play area.
+static func facade_far(x: float, z: float, w: float, d: float, h: float, lit_p := 0.0, from_y := 4.0) -> void:
+	var sides := ""
+	if z - d * 0.5 > -H:
+		sides += "n"
+	if z + d * 0.5 < H:
+		sides += "s"
+	if x - w * 0.5 > -H:
+		sides += "w"
+	if x + w * 0.5 < H:
+		sides += "e"
+	facade(x, z, w, d, from_y, h, sides, 3.0, 3.4, false, lit_p, 1.4, 1.7, 0.8)
+
+
+## Background house outside the walls (no collider): walls, gable roof, windows (lit at night).
+static func bg_house(root: Node3D, x: float, z: float, w: float, d: float, h: float, wallm: Material, roofm: Material, lit_p := 0.0) -> void:
+	_bg.append([x - w * 0.5 - 3.0, z - d * 0.5 - 3.0, x + w * 0.5 + 3.0, z + d * 0.5 + 3.0])
+	blk(root, x, 0, z, w, h, d, wallm, false)
+	var pm := PrismMesh.new()
+	var along_x := w >= d
+	pm.size = Vector3(d + 0.6 if along_x else w + 0.6, 2.2, w + 0.6 if along_x else d + 0.6)
+	mesh_node(root, pm, roofm, Vector3(x, h + 1.1, z), Vector3(0, PI / 2 if along_x else 0.0, 0))
+	facade(x, z, w, d, 0.0, h, "nsew", 2.8, 3.0, true, lit_p, 1.0, 1.3, 1.0)
+
+
+static func _bg_hit(x: float, z: float) -> bool:
+	for q in _bg:
+		if x > q[0] and x < q[2] and z > q[1] and z < q[3]:
+			return true
+	return false
+
+
+## Keeps later scattered props (crates, trees, clutter, barrels) out of a new building's interior.
+static func _guard(x0: float, z0: float, x1: float, z1: float) -> void:
+	rects.append([x0 + 0.3, z0 + 0.3, x1 - 0.3, z1 - 0.3, 0.0])
+
+
+static func _win_mm(root: Node3D, mesh: Mesh, mat: Material, list: Array) -> void:
+	if list.is_empty():
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.mesh = mesh
+	mm.instance_count = list.size()
+	for k in list.size():
+		mm.set_instance_transform(k, list[k][0])
+		mm.set_instance_color(k, list[k][1])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = mat
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	root.add_child(mmi)
+
+
+static func _flush_windows(root: Node3D) -> void:
+	if not _mats.has("win_glass"):
+		var g := StandardMaterial3D.new()
+		g.vertex_color_use_as_albedo = true
+		g.roughness = 0.1
+		g.metallic = 0.3
+		g.metallic_specular = 0.7
+		_mats["win_glass"] = g
+		var l := StandardMaterial3D.new()
+		l.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		l.vertex_color_use_as_albedo = true
+		_mats["win_lit"] = l
+		var t: StandardMaterial3D = pbr_std("concrete_floor_01", Color.WHITE, 0.6).duplicate()
+		t.vertex_color_use_as_albedo = true
+		_mats["win_trim"] = t
+	var q := QuadMesh.new()
+	q.size = Vector2.ONE
+	_win_mm(root, q, _mats["win_glass"], _win_glass)
+	_win_mm(root, q, _mats["win_lit"], _win_lit)
+	var b := BoxMesh.new()
+	b.size = Vector3.ONE
+	_win_mm(root, b, _mats["win_trim"], _win_trim)
+	_win_glass.clear()
+	_win_lit.clear()
+	_win_trim.clear()
+	if not _glass_panes.is_empty() and not ("--noglass" in OS.get_cmdline_user_args()):
+		var gs: Node3D = GLASS.new()
+		gs.name = "Glass"
+		root.add_child(gs)
+		gs.setup(_glass_panes)
+		_glass_list_debug = _glass_panes.duplicate()
+	_glass_panes.clear()
+
+
 static func label3d(parent: Node3D, text: String, pos: Vector3, size: int, col: Color, rot_y: float) -> Label3D:
 	var l := Label3D.new()
 	l.text = text
@@ -1298,6 +1759,8 @@ static func build_desert(root: Node3D) -> Array:
 		var sm := SphereMesh.new()
 		sm.radius = rng.randf_range(14, 30)
 		sm.height = sm.radius * 0.5
+		# stretched x1.6: keep the whole dune beyond the wall (big ones used to poke into the village)
+		r = maxf(r, (H + sm.radius * 1.6 + 2.0) / maxf(absf(cos(a)), absf(sin(a))))
 		mesh_node(root, sm, dune, Vector3(cos(a) * r, -2.0, sin(a) * r), Vector3(0, rng.randf() * 3, 0), false).scale = Vector3(1.6, 1, 1)
 	for i in 8:
 		var a := rng.randf() * TAU
@@ -1329,16 +1792,16 @@ static func build_desert(root: Node3D) -> Array:
 	rects.append([-1.6, -5.6, 1.6, -2.4, 1.0])
 	# houses (walls + flat roofs), doors on several sides to keep them open
 	var houses := [[-30, -32, 14, 10, 4.0, {"n": [[0, "d"]], "s": [[-3, "d"], [3, "w"]], "e": [[0, "w"]]}],
-		[30, -32, 12, 12, 4.5, {"s": [[0, "d"]], "w": [[2, "d"]], "n": [[0, "w"]]}],
-		[-30, 30, 16, 10, 4.0, {"n": [[-4, "d"], [4, "w"]], "e": [[0, "d"]]}],
+		[30, -32, 12, 12, 4.5, {"s": [[0, "d"]], "w": [[2, "d"]], "n": [[0, "w"]], "e": [[-2.5, "w"], [2.5, "w"]]}],
+		[-30, 30, 16, 10, 4.0, {"n": [[-4, "d"], [4, "w"]], "e": [[0, "d"]], "s": [[-4, "w"], [3, "w"]], "w": [[0, "w"]]}],
 		[30, 30, 12, 14, 4.0, {"n": [[0, "d"]], "w": [[-3, "d"], [3, "w"]]}],
-		[0, -44, 18, 9, 5.0, {"s": [[-5, "d"], [0, "w"], [5, "d"]]}],
-		[-46, 2, 10, 16, 4.0, {"e": [[-4, "d"], [4, "d"]]}],
-		[46, 2, 10, 14, 4.5, {"w": [[0, "d"]], "n": [[0, "w"]]}],
-		[-15, -18, 8, 7, 3.4, {"e": [[0, "d"]], "s": [[0, "w"]]}],
-		[16, 14, 8, 8, 3.4, {"w": [[0, "d"]], "n": [[0, "w"]]}],
-		[-17, 16, 7, 7, 3.2, {"n": [[0, "d"]], "e": [[0, "w"]]}],
-		[18, -17, 7, 8, 3.2, {"s": [[0, "d"]], "w": [[0, "w"]]}]]
+		[0, -44, 18, 9, 5.0, {"s": [[-5, "d"], [0, "w"], [5, "d"]], "n": [[-5, "w"], [0, "w"], [5, "w"]]}],
+		[-46, 2, 10, 16, 4.0, {"e": [[-4, "d"], [4, "d"]], "w": [[-4, "w"], [4, "w"]], "n": [[0, "w"]]}],
+		[46, 2, 10, 14, 4.5, {"w": [[0, "d"]], "n": [[0, "w"]], "e": [[-3, "w"], [3, "w"]], "s": [[0, "w"]]}],
+		[-15, -18, 8, 7, 3.4, {"e": [[0, "d"]], "s": [[0, "w"]], "w": [[0, "w"]]}],
+		[16, 14, 8, 8, 3.4, {"w": [[0, "d"]], "n": [[0, "w"]], "e": [[0, "w"]]}],
+		[-17, 16, 7, 7, 3.2, {"n": [[0, "d"]], "e": [[0, "w"]], "s": [[0, "w"]]}],
+		[18, -17, 7, 8, 3.2, {"s": [[0, "d"]], "w": [[0, "w"]], "n": [[0, "w"]]}]]
 	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
 	for hi in houses.size():
 		var hh: Array = houses[hi]
@@ -1353,6 +1816,21 @@ static func build_desert(root: Node3D) -> Array:
 		roof(root, hh[0], hh[1], hh[2], hh[3], hh[4], trim)
 		if hh[2] >= 10.0 and hh[3] >= 9.0:
 			furnish(root, hh[0] - hh[2] * 0.5 + 0.2, hh[1] - hh[3] * 0.5 + 0.2, hh[0] + hh[2] * 0.5 - 0.2, hh[1] + hh[3] * 0.5 - 0.2, 0.0)
+	# outskirts: more small adobe houses in the corners and along the north edge (all enterable)
+	for hh in [[-45, -46, 9, 8, 4.5, {"s": [[0, "d"]], "e": [[0, "w"]], "n": [[0, "w"]], "w": [[0, "w"]]}],
+			[46, -46, 9, 8, 4.5, {"s": [[0, "d"]], "w": [[0, "w"]], "n": [[0, "w"]], "e": [[0, "w"]]}],
+			[-47, 47, 7, 7, 3.6, {"n": [[0, "d"]], "e": [[0, "w"]], "s": [[0, "w"]]}],
+			[47, 48, 7, 7, 3.6, {"n": [[0, "d"]], "w": [[0, "w"]], "e": [[0, "w"]]}],
+			[-17, -46, 7, 7, 3.8, {"s": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]]}],
+			[17, -46, 7, 7, 3.8, {"s": [[0, "d"]], "w": [[0, "w"]], "n": [[0, "w"]]}]]:
+		var m2: Material = adobe if absf(hh[0]) > 30 else adobe2
+		building(root, hh[0], hh[1], hh[2], hh[3], hh[4], hh[5], m2, trim)
+		roof(root, hh[0], hh[1], hh[2], hh[3], hh[4], trim)
+		var hx0: float = hh[0] - hh[2] * 0.5
+		var hz0: float = hh[1] - hh[3] * 0.5
+		if hh[2] >= 9.0:
+			furnish(root, hx0 + 0.2, hz0 + 0.2, hx0 + hh[2] - 0.2, hz0 + hh[3] - 0.2, 0.0)
+		_guard(hx0, hz0, hx0 + hh[2], hz0 + hh[3])
 	# low adobe cover walls
 	for q in [[-8, 8, 5, 0.5], [9, 6, 0.5, 4], [-36, -14, 6, 0.5], [36, -12, 0.5, 6], [-40, 40, 6, 0.5], [40, 42, 0.5, 6], [0, 22, 6, 0.5], [-24, 0, 0.5, 5], [24, -2, 0.5, 5]]:
 		blk(root, q[0], 0, q[1], q[2], 1.25, q[3], adobe2, true, 0.12)
@@ -1423,6 +1901,24 @@ static func build_port(root: Node3D) -> Array:
 		building(root, w[0], w[1], w[2], w[3], w[4], w[5], metal, conc)
 		roof(root, w[0], w[1], w[2], w[3], w[4], c_grey)
 		blk(root, w[0], w[4] + 0.38, w[1], w[2] + 0.4, 0.14, w[3] + 0.4, white, false)
+		# clerestory: a band of wide low panes high up on every side
+		facade(w[0], w[1], w[2] + 0.42, w[3] + 0.42, w[4] - 1.75, w[4], "nsew", 3.0, 3.0, true, 0.0, 2.2, 0.75, 0.25)
+	# harbour offices: a two-storey block (west) and single-storey offices / guard post
+	var offm := pbr("concrete_block_wall", Color(0.78, 0.74, 0.68))
+	var planks := pbr("brown_planks_04", Color(0.85, 0.78, 0.66), 0.8)
+	house2(root, -45, -5, 12, 10, {"s": [[-2, "d"]], "e": [[0, "d"]], "n": [[3.5, "w"]], "w": [[1.5, "w"]]},
+		{"n": [[3.5, "w"]], "s": [[-3.5, "w"], [0, "w"], [3.5, "w"]], "e": [[0, "w"]], "w": [[1.5, "w"]]}, offm, conc, conc, planks)
+	_guard(-51, -10, -39, 0)
+	for b in [[-20, 46, 12, 8, 4.2, {"n": [[-3, "d"], [2, "w"]], "e": [[0, "d"]], "s": [[-3.5, "w"], [0, "w"], [3.5, "w"]], "w": [[0, "w"]]}],
+			[20, 46, 12, 8, 4.2, {"n": [[3, "d"], [-2, "w"]], "w": [[0, "d"]], "s": [[-3.5, "w"], [0, "w"], [3.5, "w"]], "e": [[0, "w"]]}],
+			[45, -7, 10, 6, 3.6, {"w": [[0, "d"]], "n": [[-2.5, "w"], [2.5, "w"]], "s": [[-3, "w"], [0.5, "d"]], "e": [[0, "w"]]}]]:
+		building(root, b[0], b[1], b[2], b[3], b[4], b[5], offm, conc)
+		roof(root, b[0], b[1], b[2], b[3], b[4], c_grey)
+		blk(root, b[0], b[4] + 0.38, b[1], b[2] + 0.4, 0.14, b[3] + 0.4, white, false)
+		var bx0: float = b[0] - b[2] * 0.5
+		var bz0: float = b[1] - b[3] * 0.5
+		furnish(root, bx0 + 0.2, bz0 + 0.2, bx0 + b[2] - 0.2, bz0 + b[3] - 0.2, 0.0)
+		_guard(bx0, bz0, bx0 + b[2], bz0 + b[3])
 	# container stacks with snow caps
 	var conts := [[-12, -36, 0], [-12, -36, 1], [2, -38, 0], [16, -34, 0], [16, -34, 1], [-20, 4, 0], [-20, 4, 1], [20, 6, 0], [6, 16, 0], [-6, -10, 0], [12, -12, 0], [-44, 8, 0], [46, 6, 0], [46, 6, 1]]
 	var cmats := [c_red, c_blue, c_orange, c_grey]
@@ -1677,7 +2173,12 @@ static func zring(root: Node3D, wallm: Material, inner: Material, buy_names: Dic
 		reserve(b[0].x + b[1].x * 1.5, b[0].z + b[1].z * 1.5, 2.0)
 	var perks := [[Vector3(34, 0, -8), Vector3(-1, 0, 0), "armor", "Blindaje", 2500, Color(0.25, 0.55, 1.0)],
 		[Vector3(-34, 0, 8), Vector3(1, 0, 0), "hands", "Manos rápidas", 3000, Color(0.3, 1.0, 0.45)],
-		[Vector3(20, 0, 32), Vector3(0, 0, -1), "pulse", "Pulso", 2000, Color(1.0, 0.35, 0.25)]]
+		[Vector3(20, 0, 32), Vector3(0, 0, -1), "pulse", "Pulso", 2000, Color(1.0, 0.35, 0.25)],
+		# against the outer faces of the zone walls (north and south strips)
+		[Vector3(-20, 0, -12.75), Vector3(0, 0, -1), "stride", "Zancada", 2000, Color(0.95, 0.85, 0.2)],
+		[Vector3(34, 0, -12.75), Vector3(0, 0, -1), "sling", "Bandolera", 4000, Color(0.75, 0.5, 0.3)],
+		[Vector3(20, 0, 12.75), Vector3(0, 0, 1), "wind", "Segundo Aliento", 1500, Color(0.35, 0.85, 1.0)],
+		[Vector3(-34, 0, 12.75), Vector3(0, 0, 1), "caliber", "Calibre", 2500, Color(0.75, 0.35, 1.0)]]
 	var pk := []
 	for p in perks:
 		perk_machine(root, p[0], p[1], p[3], p[4], p[5], p[2])
@@ -1743,11 +2244,18 @@ static func build_pueblo(root: Node3D, buy_names := {}) -> Array:
 	for q in [[-26, -26], [26, -26], [-26, 26], [26, 26]]:
 		flat(root, Vector3(q[0], 0.008, q[1]), Vector2(22, 20), grassm)
 	zring(root, wallm, stone, buy_names)
-	# outside: dark forest silhouettes + church spire
+	# outside: a village behind the walls (lit windows), dark forest silhouettes + church spire
+	var vroof := pbr("clay_roof_tiles_02", Color(0.6, 0.5, 0.46), 0.5)
+	for q in [[-49, -30, 10, 8], [-50, -6, 8, 10], [-48, 20, 11, 8], [-52, 40, 9, 9], [49, -36, 9, 8], [51, -12, 8, 11],
+			[48, 14, 10, 8], [52, 36, 9, 10], [-30, -50, 10, 8], [-6, -51, 11, 8], [22, -49, 9, 8], [-24, 50, 10, 8], [14, 51, 11, 8], [38, 52, 8, 9]]:
+		var hm: Material = [brick, plaster, plaster2][_wrng.randi() % 3]
+		bg_house(root, q[0], q[1], q[2], q[3], _wrng.randf_range(6.2, 7.6), hm, vroof, 0.3)
 	for i in 60:
 		var a := rng.randf() * TAU
 		var r := rng.randf_range(50, 110)
-		pine(root, cos(a) * r, sin(a) * r, rng.randf_range(1.4, 2.4), false)
+		var ps := rng.randf_range(1.4, 2.4)
+		if not _bg_hit(cos(a) * r, sin(a) * r):
+			pine(root, cos(a) * r, sin(a) * r, ps, false)
 	# courtyard: dry fountain, benches, lamps
 	var sb := StaticBody3D.new()
 	sb.position = Vector3(0, 0.35, -2)
@@ -1778,17 +2286,21 @@ static func build_pueblo(root: Node3D, buy_names := {}) -> Array:
 	for q in [[-10, -10], [10, -10], [-10, 10], [10, 10]]:
 		lamp(root, q[0], q[1], 1 if q[0] < 0 else -1, 0)
 	# houses in the outer zones (with roofs)
-	var houses := [[-30, -27, 10, 8, 3.6, {"s": [[0, "d"]], "e": [[0, "w"]]}, brick], [30, -27, 10, 8, 3.6, {"s": [[0, "d"]], "w": [[0, "w"]]}, plaster],
-		[0, -34, 10, 7, 4.0, {"s": [[-2, "d"], [3, "w"]]}, plaster2], [-30, 28, 10, 8, 3.6, {"n": [[0, "d"]], "e": [[0, "w"]]}, plaster],
-		[32, 27, 8, 8, 3.6, {"n": [[0, "d"]]}, brick], [26, 2, 8, 8, 3.5, {"w": [[0, "d"]], "s": [[0, "w"]]}, plaster2],
-		[-27, -3, 8, 6, 3.5, {"e": [[0, "d"]], "n": [[0, "w"]]}, brick]]
+	var houses := [[-30, -27, 10, 8, 3.6, {"s": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]], "n": [[-2.5, "w"], [2.5, "w"]]}, brick],
+		[30, -27, 10, 8, 3.6, {"s": [[0, "d"]], "w": [[0, "w"]], "e": [[0, "w"]], "n": [[-2.5, "w"], [2.5, "w"]]}, plaster],
+		[0, -34, 10, 7, 4.0, {"s": [[-2, "d"], [3, "w"]], "n": [[-2.5, "w"], [2.5, "w"]], "e": [[0, "w"]], "w": [[0, "w"]]}, plaster2],
+		[-30, 28, 10, 8, 3.6, {"n": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]], "s": [[-2.5, "w"], [2.5, "w"]]}, plaster],
+		[32, 27, 8, 8, 3.6, {"n": [[0, "d"]], "w": [[0, "w"]], "e": [[0, "w"]], "s": [[0, "w"]]}, brick],
+		[26, 2, 8, 8, 3.5, {"w": [[0, "d"]], "s": [[0, "w"]], "n": [[0, "w"]], "e": [[0, "w"]]}, plaster2],
+		[-27, -3, 8, 6, 3.5, {"e": [[0, "d"]], "n": [[0, "w"]], "s": [[0, "w"]], "w": [[0, "w"]]}, brick]]
 	for hh in houses:
 		building(root, hh[0], hh[1], hh[2], hh[3], hh[4], hh[5], hh[6], stone)
 		roof(root, hh[0], hh[1], hh[2], hh[3], hh[4], roofm)
 	# small chapel in the south zone with a bell tower
-	building(root, 0, 31, 12, 9, 5.5, {"n": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]]}, plaster, stone)
+	building(root, 0, 31, 12, 9, 5.5, {"n": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]], "s": [[-3, "w"], [3, "w"]]}, plaster, stone)
 	roof(root, 0, 31, 12, 9, 5.5, roofm)
 	blk(root, -8, 0, 37, 3, 11, 3, plaster, true, 0.1)
+	facade(-8, 37, 3, 3, 5.0, 11.0, "nsw", 2.0, 3.0, true, 0.6, 0.7, 1.4, 0.8)
 	blk(root, -8, 11, 37, 3.4, 0.4, 3.4, stone, false, 0.05)
 	var cone := CylinderMesh.new()
 	cone.top_radius = 0.0
@@ -1852,9 +2364,15 @@ static func build_factory(root: Node3D, buy_names := {}) -> Array:
 	for i in 30:
 		var a := rng.randf() * TAU
 		var r := rng.randf_range(60, 130)
-		blk(root, cos(a) * r, 0, sin(a) * r, rng.randf_range(12, 30), rng.randf_range(8, 22), rng.randf_range(12, 30), inner, false)
-	# north: big factory hall (mystery box inside)
-	building(root, 0, -28, 30, 14, 7.0, {"s": [[-10, "d"], [0, "d"], [10, "d"]], "n": [[-8, "w"], [8, "w"]], "e": [[0, "d"]], "w": [[0, "d"]]}, metal, plate)
+		var bw := rng.randf_range(12, 30)
+		var bh := rng.randf_range(8, 22)
+		var bd := rng.randf_range(12, 30)
+		blk(root, cos(a) * r, 0, sin(a) * r, bw, bh, bd, inner, false)
+		facade_far(cos(a) * r, sin(a) * r, bw, bd, bh, 0.12, 3.0)
+	# north: big factory hall (mystery box inside), high window band all round
+	building(root, 0, -28, 30, 14, 7.0, {"s": [[-10, "d"], [0, "d"], [10, "d"]], "n": [[-12, "w"], [-8, "w"], [-4, "w"], [4, "w"], [8, "w"], [12, "w"]],
+		"e": [[0, "d"]], "w": [[0, "d"]]}, metal, plate)
+	facade(0, -28, 30.42, 14.42, 3.0, 7.0, "nsew", 3.2, 3.3, true, 0.35, 1.6, 1.2, 0.5)
 	roof(root, 0, -28, 30, 14, 7.0, rusty)
 	for x in [-10.0, 0.0, 10.0]:
 		lamp_light(root, Vector3(x, 6.2, -28), Color(0.85, 0.95, 1.0), 2.4, 14.0)
@@ -1893,7 +2411,7 @@ static func build_factory(root: Node3D, buy_names := {}) -> Array:
 	for i in 7:
 		blk(root, -32 + i * 2.0, 1.0, 6, 0.9, 0.5, 0.9, crate, false, 0.03)
 	# south: warehouse
-	building(root, 0, 30, 20, 10, 5.5, {"n": [[-5, "d"], [5, "d"]], "e": [[0, "w"]]}, rusty, plate)
+	building(root, 0, 30, 20, 10, 5.5, {"n": [[-5, "d"], [5, "d"]], "e": [[0, "w"]], "w": [[0, "w"]], "s": [[-5, "w"], [0, "w"], [5, "w"]]}, rusty, plate)
 	roof(root, 0, 30, 20, 10, 5.5, metal)
 	lamp_light(root, Vector3(0, 4.8, 30), Color(1.0, 0.8, 0.55), 2.0, 12.0)
 	# containers + forklift crates in the yard
@@ -1929,6 +2447,24 @@ static func _solid(root: Node3D, x: float, z: float, size: Vector3, rot := 0.0) 
 	root.add_child(sb)
 	var r := maxf(size.x, size.z) * 0.5
 	rects.append([x - r, z - r, x + r, z + r, size.y])
+
+
+## Boarded-up barricade: two posts with uneven planks nailed across (cover, blocks movement).
+static func barricade(root: Node3D, x: float, z: float, rot: float) -> void:
+	var wood := pbr("brown_planks_04", Color(0.62, 0.52, 0.42), 0.8, 0.0, false)
+	var n := Node3D.new()
+	n.position = Vector3(x, 0, z)
+	n.rotation.y = rot
+	root.add_child(n)
+	for sx in [-1.1, 1.1]:
+		mesh_node(n, SHP.rbox(Vector3(0.14, 1.5, 0.14), 0.02, 1), wood, Vector3(sx, 0.75, 0), Vector3(rng.randf_range(-0.05, 0.05), 0, rng.randf_range(-0.06, 0.06)))
+	for k in 4:
+		var y := 0.3 + k * 0.33 + rng.randf_range(-0.05, 0.05)
+		mesh_node(n, SHP.rbox(Vector3(rng.randf_range(2.3, 2.7), 0.2, 0.05), 0.015, 1), wood, Vector3(rng.randf_range(-0.12, 0.12), y, 0.1),
+			Vector3(0, 0, rng.randf_range(-0.12, 0.12)))
+	# one plank hanging loose
+	mesh_node(n, SHP.rbox(Vector3(1.4, 0.2, 0.05), 0.015, 1), wood, Vector3(0.6, 0.5, 0.16), Vector3(0, 0, 0.8))
+	_solid(root, x, z, Vector3(2.4, 1.5, 0.4), rot)
 
 
 static func cone(root: Node3D, x: float, z: float) -> void:
@@ -2358,7 +2894,7 @@ static func clutter(root: Node3D, i: int, half: float, n: int) -> void:
 
 
 static func dress(root: Node3D, i: int) -> void:
-	clutter(root, i, 52.0 if MAPS[i].mode != "zombies" else 34.0, 24 if MAPS[i].mode != "zombies" else 15)
+	clutter(root, i, 52.0 if MAPS[i].mode != "zombies" else 34.0, 34 if MAPS[i].mode != "zombies" else 22)
 	match i:
 		0:
 			for q in [[6.2, -26], [-6.2, -6], [6.2, 20], [-6.2, 32], [20, -15], [-24, -18], [36, -14.5], [-40, -19.5]]:
@@ -2434,6 +2970,546 @@ static func dress(root: Node3D, i: int) -> void:
 				tires(root, q[0], q[1])
 			for q in [[16, -20], [-16, 20]]:
 				rubble_pile(root, q[0], q[1], 1.0)
+
+
+# ================================================================ ambience (extra lived-in dressing)
+## Everything here runs after the layout, the clutter and the fire barrels, and only uses free ground:
+## solid props keep ~1.1 m of clearance to any other solid (nav agent radius 0.5 + a margin), stay away
+## from doors, the player start and building interiors, and on the zombie maps solids stay out of the
+## start courtyard. Spawns / gates / wall-buys / perks / the box are already reserved in `rects`.
+const AMB_GAP := 1.1
+
+
+static func _amb_ok(i: int, x: float, z: float, r: float, solid: bool) -> bool:
+	if not is_free(x, z, r):
+		return false
+	var st: Vector3 = MAPS[i].start
+	if Vector2(x - st.x, z - st.z).length() < 7.0:
+		return false
+	for d in door_pts:
+		if Vector2(x, z).distance_to(d) < 3.2 + r:
+			return false
+	for q in rooms:
+		if x > q[0] - 0.6 and x < q[2] + 0.6 and z > q[1] - 0.6 and z < q[3] + 0.6:
+			return false
+	if solid and MAPS[i].mode == "zombies" and absf(x) < 13.0 and absf(z) < 13.0:
+		return false
+	return true
+
+
+## Calls fn(x, z) on up to n random free spots (radius r) inside the play area.
+static func _amb_scatter(i: int, n: int, r: float, solid: bool, fn: Callable, margin := 3.0) -> void:
+	var half := H - margin
+	var placed := 0
+	for t in n * 30:
+		if placed >= n:
+			break
+		var x := rng.randf_range(-half, half)
+		var z := rng.randf_range(-half, half)
+		if not _amb_ok(i, x, z, r, solid):
+			continue
+		placed += 1
+		fn.call(x, z)
+
+
+## Fixed candidate spots (e.g. along a sidewalk): only the free ones are used.
+static func _amb_at(i: int, pts: Array, r: float, fn: Callable) -> void:
+	for q in pts:
+		if _amb_ok(i, q[0], q[1], r, true):
+			fn.call(q[0], q[1], q[2] if q.size() > 2 else rng.randf() * TAU)
+
+
+## Many tiny decorative instances (litter, leaves, bones): one MultiMesh per 16 m cell, no shadows,
+## no collision, faded out at `far`.
+static func _mm_cells(root: Node3D, mesh: Mesh, mat: Material, xs: Array, cols: Array, far := 38.0) -> void:
+	var cells := {}
+	for k in xs.size():
+		var t: Transform3D = xs[k]
+		var key := Vector2i(int(floor(t.origin.x / 16.0)), int(floor(t.origin.z / 16.0)))
+		if not cells.has(key):
+			cells[key] = []
+		cells[key].append(k)
+	for key in cells:
+		var list: Array = cells[key]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = mesh
+		mm.instance_count = list.size()
+		for j in list.size():
+			mm.set_instance_transform(j, xs[list[j]])
+			mm.set_instance_color(j, cols[list[j]])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = mat
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+		mmi.visibility_range_end = far
+		mmi.visibility_range_end_margin = 6.0
+		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		mmi.set_meta("nomerge", true)
+		root.add_child(mmi)
+
+
+static func _vcol_mat(rough: float, metal := 0.0) -> StandardMaterial3D:
+	var key := "vcol|%s|%s" % [rough, metal]
+	if _mats.has(key):
+		return _mats[key]
+	var m := StandardMaterial3D.new()
+	m.vertex_color_use_as_albedo = true
+	m.roughness = rough
+	m.metallic = metal
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_mats[key] = m
+	return m
+
+
+## Ground litter: paper / cardboard scraps, crushed cans and (optionally) dead leaves.
+static func litter(root: Node3D, n: int, paper: Array, leaves_n := 0, cans := true) -> void:
+	var sheet := PlaneMesh.new()
+	sheet.size = Vector2(0.22, 0.3)
+	var xs := []
+	var cs := []
+	var lx := []
+	var lc := []
+	var cx := []
+	var cc := []
+	var half := H - 1.5
+	for t in (n + leaves_n) * 3:
+		if xs.size() + lx.size() + cx.size() >= n + leaves_n:
+			break
+		var x := rng.randf_range(-half, half)
+		var z := rng.randf_range(-half, half)
+		if not is_free(x, z, 0.15):
+			continue
+		var inside := false
+		for q in rooms:
+			if x > q[0] and x < q[2] and z > q[1] and z < q[3]:
+				inside = true
+				break
+		var b := Basis(Vector3.UP, rng.randf() * TAU) * Basis.from_euler(Vector3(rng.randf_range(-0.12, 0.12), 0, rng.randf_range(-0.12, 0.12)))
+		if lx.size() < leaves_n and rng.randf() < float(leaves_n) / float(n + leaves_n):
+			var s := rng.randf_range(0.35, 0.6)
+			lx.append(Transform3D(b * Basis.from_scale(Vector3(s, 1, s * 0.8)), Vector3(x, 0.03, z)))
+			lc.append(Color.from_hsv(rng.randf_range(0.05, 0.11), rng.randf_range(0.5, 0.75), rng.randf_range(0.22, 0.42)))
+		elif cans and not inside and rng.randf() < 0.18:
+			cx.append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU) * Basis(Vector3.RIGHT, PI / 2), Vector3(x, 0.035, z)))
+			cc.append([Color(0.6, 0.12, 0.1), Color(0.15, 0.3, 0.6), Color(0.7, 0.7, 0.68), Color(0.2, 0.45, 0.2)][rng.randi() % 4])
+		elif paper.size() > 0:
+			var s := rng.randf_range(0.6, 1.5)
+			xs.append(Transform3D(b * Basis.from_scale(Vector3(s, 1, s)), Vector3(x, 0.03, z)))
+			cs.append((paper[rng.randi() % paper.size()] as Color) * rng.randf_range(0.8, 1.05))
+	if xs.size() > 0:
+		_mm_cells(root, sheet, _vcol_mat(0.95), xs, cs)
+	if lx.size() > 0:
+		var leaf := PlaneMesh.new()
+		leaf.size = Vector2(0.12, 0.16)
+		_mm_cells(root, leaf, _vcol_mat(0.9), lx, lc, 32.0)
+	if cx.size() > 0:
+		var can := CylinderMesh.new()
+		can.top_radius = 0.033
+		can.bottom_radius = 0.033
+		can.height = 0.12
+		can.radial_segments = 8
+		can.rings = 1
+		_mm_cells(root, can, _vcol_mat(0.35, 0.7), cx, cc, 30.0)
+
+
+## Bones lying around (zombie maps): long bones + skulls, two MultiMeshes for the whole map.
+static func bones(root: Node3D, i: int, piles: int) -> void:
+	var bx := []
+	var bc := []
+	var sx := []
+	var sc := []
+	var half := H - 2.0
+	var placed := 0
+	for t in piles * 20:
+		if placed >= piles:
+			break
+		var x := rng.randf_range(-half, half)
+		var z := rng.randf_range(-half, half)
+		if not _amb_ok(i, x, z, 0.6, false):
+			continue
+		placed += 1
+		for k in 3 + rng.randi() % 4:
+			var p := Vector3(x + rng.randf_range(-0.5, 0.5), 0.03, z + rng.randf_range(-0.5, 0.5))
+			var b := Basis(Vector3.UP, rng.randf() * TAU) * Basis(Vector3.RIGHT, PI / 2 + rng.randf_range(-0.1, 0.1))
+			bx.append(Transform3D(b.scaled(Vector3.ONE * rng.randf_range(0.7, 1.2)), p))
+			bc.append(Color(0.78, 0.74, 0.62) * rng.randf_range(0.75, 1.0))
+		if rng.randf() < 0.75:
+			var b2 := Basis.from_euler(Vector3(rng.randf_range(-0.4, 0.2), rng.randf() * TAU, rng.randf_range(-0.3, 0.3))) * Basis.from_scale(Vector3(0.9, 0.85, 1.1))
+			sx.append(Transform3D(b2, Vector3(x + rng.randf_range(-0.3, 0.3), 0.08, z + rng.randf_range(-0.3, 0.3))))
+			sc.append(Color(0.82, 0.78, 0.66) * rng.randf_range(0.75, 1.0))
+		if rng.randf() < 0.5:
+			stain(root, x, z, rng.randf_range(1.0, 1.8), "blood")
+	if bx.size() > 0:
+		var cap := CapsuleMesh.new()
+		cap.radius = 0.025
+		cap.height = 0.38
+		cap.radial_segments = 6
+		cap.rings = 2
+		_mm_cells(root, cap, _vcol_mat(0.7), bx, bc, 30.0)
+	if sx.size() > 0:
+		var sk := SphereMesh.new()
+		sk.radius = 0.1
+		sk.height = 0.19
+		sk.radial_segments = 10
+		sk.rings = 6
+		_mm_cells(root, sk, _vcol_mat(0.7), sx, sc, 30.0)
+
+
+## Ground stains as decals: "blood", "oil" (dark blots) and "scorch" (burn marks).
+static var _stain_tex := {}
+static func stain(root: Node3D, x: float, z: float, s: float, kind: String) -> void:
+	if not _stain_tex.has(kind):
+		var sd: int = {"blood": 11, "oil": 23, "scorch": 37}[kind]
+		var col: Color = {"blood": Color(0.2, 0.012, 0.01, 0.9), "oil": Color(0.015, 0.015, 0.018, 0.75), "scorch": Color(0.02, 0.018, 0.015, 0.8)}[kind]
+		var nz := FastNoiseLite.new()
+		nz.seed = sd
+		nz.frequency = 0.06
+		var r := RandomNumberGenerator.new()
+		r.seed = sd
+		var drops := []
+		if kind == "blood":
+			for k in 16:
+				var a := r.randf() * TAU
+				var dist := r.randf_range(0.35, 0.9)
+				drops.append(Vector3(cos(a) * dist, sin(a) * dist, r.randf_range(0.015, 0.06)))
+		var img := Image.create(128, 128, false, Image.FORMAT_RGBA8)
+		for y in 128:
+			for xx in 128:
+				var dx := (xx - 64.0) / 64.0
+				var dy := (y - 64.0) / 64.0
+				var d := sqrt(dx * dx + dy * dy)
+				var v := 0.0
+				if kind == "scorch":
+					v = clampf((1.0 - d) * 1.5 + nz.get_noise_2d(xx, y) * 0.6 - 0.25, 0.0, 1.0)
+				else:
+					var core := 0.42 if kind == "blood" else 0.55
+					v = clampf((nz.get_noise_2d(xx, y) * 0.5 + core - d) * 6.0, 0.0, 1.0)
+				for dp in drops:
+					if Vector2(dx - dp.x, dy - dp.y).length() < dp.z:
+						v = 1.0
+				img.set_pixel(xx, y, Color(col.r, col.g, col.b, v * col.a))
+		img.generate_mipmaps()
+		_stain_tex[kind] = ImageTexture.create_from_image(img)
+	var dc := Decal.new()
+	dc.texture_albedo = _stain_tex[kind]
+	dc.size = Vector3(s, 0.5, s)
+	dc.cull_mask = 1
+	dc.distance_fade_enabled = true
+	dc.distance_fade_begin = 40.0
+	dc.distance_fade_length = 8.0
+	dc.position = Vector3(x, 0.05, z)
+	dc.rotation.y = rng.randf() * TAU
+	root.add_child(dc)
+
+
+static func stains(root: Node3D, i: int, n: int, kind: String, smin: float, smax: float) -> void:
+	_amb_scatter(i, n, 0.5, false, func(x: float, z: float) -> void: stain(root, x, z, rng.randf_range(smin, smax), kind), 2.0)
+
+
+## Park bench (scanned Poly Haven "painted_wooden_bench", primitive fallback).
+static func bench(root: Node3D, x: float, z: float, rot: float) -> void:
+	if has_model("painted_wooden_bench"):
+		prop(root, "painted_wooden_bench", x, z, rot, 1.15)
+		return
+	var n := Node3D.new()
+	n.position = Vector3(x, 0, z)
+	n.rotation.y = rot
+	root.add_child(n)
+	var wood := pbr("brown_planks_04", Color(0.85, 0.75, 0.6), 0.8, 0.0, false)
+	blk(n, 0, 0.42, 0, 1.6, 0.08, 0.45, wood, false, 0.02)
+	blk(n, 0, 0.5, -0.2, 1.6, 0.4, 0.06, wood, false, 0.02)
+	for s in [-0.7, 0.7]:
+		blk(n, s, 0, 0, 0.08, 0.42, 0.42, colm(Color(0.1, 0.1, 0.1), 0.5, 0.7), false)
+	_solid(root, x, z, Vector3(1.6, 0.9, 0.5) if absf(sin(rot)) < 0.5 else Vector3(0.5, 0.9, 1.6))
+
+
+static func hydrant(root: Node3D, x: float, z: float) -> void:
+	if has_model("fire_hydrant"):
+		prop(root, "fire_hydrant", x, z, rng.randf() * TAU, 1.0)
+
+
+static func utility_box(root: Node3D, x: float, z: float, rot: float) -> void:
+	if has_model("utility_box_01"):
+		prop(root, "utility_box_01", x, z, rot, 1.0)
+
+
+## Fallen dead trunk (scanned "dead_tree_trunk", 3 m long).
+static func log_down(root: Node3D, x: float, z: float, rot: float, s := 1.0) -> void:
+	if has_model("dead_tree_trunk"):
+		prop(root, "dead_tree_trunk", x, z, rot, s, -0.04)
+
+
+## Group of non-explosive drums (the flammable Barrel_01 stays a gameplay item placed by the maps).
+static func drums(root: Node3D, x: float, z: float) -> void:
+	if not has_model("Barrel_02"):
+		return
+	for k in 2 + rng.randi() % 3:
+		var id: String = ["Barrel_02", "barrel_03"][rng.randi() % 2]
+		var a := k * 2.1 + rng.randf() * 0.5
+		var px := x + (cos(a) * 0.38 if k > 0 else 0.0)
+		var pz := z + (sin(a) * 0.38 if k > 0 else 0.0)
+		if k == 3:   # one knocked over
+			var b := model_box(id)
+			var t := prop(root, id, px + 0.5, pz, rng.randf() * TAU, 0.92 / b.size.y, 0.0, false, Vector3(PI / 2, 0, 0))
+			t.position.y = b.size.x * 0.92 / b.size.y * 0.5
+		else:
+			prop(root, id, px, pz, rng.randf() * TAU, 0.92 / model_box(id).size.y)
+
+
+## Short broken fence run: wooden pickets with gaps, or chain-link on steel posts.
+static var _chain_mat: StandardMaterial3D
+static func fence_run(root: Node3D, x: float, z: float, rot: float, length: float, chain: bool) -> void:
+	var n := Node3D.new()
+	n.position = Vector3(x, 0, z)
+	n.rotation.y = rot
+	root.add_child(n)
+	var posts := int(length / 1.5) + 1
+	if chain:
+		var steel := colm(Color(0.45, 0.46, 0.47), 0.45, 0.8)
+		if _chain_mat == null:
+			var img := Image.create(32, 32, false, Image.FORMAT_RGBA8)
+			img.fill(Color(0, 0, 0, 0))
+			for k in 32:
+				for w in 2:
+					img.set_pixel((k + w) % 32, k, Color(0.6, 0.62, 0.63, 1))
+					img.set_pixel((31 - k + w) % 32, k, Color(0.6, 0.62, 0.63, 1))
+			img.generate_mipmaps()
+			_chain_mat = StandardMaterial3D.new()
+			_chain_mat.albedo_texture = ImageTexture.create_from_image(img)
+			_chain_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			_chain_mat.alpha_scissor_threshold = 0.4
+			_chain_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			_chain_mat.metallic = 0.7
+			_chain_mat.roughness = 0.45
+			_chain_mat.uv1_scale = Vector3(length * 6.0, 2.0 * 6.0, 1)
+		var q := QuadMesh.new()
+		q.size = Vector2(length, 1.9)
+		var mi := mesh_node(n, q, _chain_mat, Vector3(0, 1.0, 0), Vector3.ZERO, false)
+		mi.set_meta("nomerge", true)
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.035
+		cm.bottom_radius = 0.035
+		cm.height = 2.0
+		cm.radial_segments = 6
+		for k in posts:
+			mesh_node(n, cm, steel, Vector3(-length * 0.5 + length * k / (posts - 1), 1.0, 0))
+		var rail := CylinderMesh.new()
+		rail.top_radius = 0.025
+		rail.bottom_radius = 0.025
+		rail.height = length
+		rail.radial_segments = 6
+		mesh_node(n, rail, steel, Vector3(0, 1.95, 0), Vector3(0, 0, PI / 2), false)
+	else:
+		var wood := pbr("distressed_painted_planks", Color(0.8, 0.75, 0.7), 1.0, 0.0, false)
+		for k in posts:
+			blk(n, -length * 0.5 + length * k / (posts - 1), 0, 0, 0.1, 1.15, 0.1, wood, false, 0.01)
+		for y in [0.3, 0.85]:
+			blk(n, 0, y, 0.07, length, 0.08, 0.03, wood, false, 0.01)
+		var px := -length * 0.5 + 0.12
+		while px < length * 0.5 - 0.1:
+			if rng.randf() < 0.8:
+				var hgt := rng.randf_range(0.85, 1.1)
+				var p := blk(n, px, 0.0, 0.1, 0.09, hgt, 0.02, wood, false, 0.005)
+				p.rotation.z = rng.randf_range(-0.12, 0.12) if rng.randf() < 0.3 else 0.0
+				p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			px += 0.14
+	var along_x := absf(sin(rot)) < 0.5
+	collider_only(root, Vector3(x, 0.8 if chain else 0.6, z), Vector3(length, 1.6 if chain else 1.2, 0.15) if along_x else Vector3(0.15, 1.6 if chain else 1.2, length))
+
+
+## Snow-capped stack of supply crates (arctic).
+static func snowy_crates(root: Node3D, x: float, z: float) -> void:
+	if not has_model("wooden_crate_01"):
+		return
+	var s := rng.randf_range(1.0, 1.3)
+	var top := _crate(root, x, z, s, 0.0)
+	var cap := SphereMesh.new()
+	cap.radius = 0.5
+	cap.height = 0.25
+	cap.is_hemisphere = true
+	cap.radial_segments = 12
+	cap.rings = 4
+	mesh_node(root, cap, pbr("snow_02", Color.WHITE, 0.6, 0.0, false), Vector3(x, top - 0.04, z), Vector3(0, rng.randf() * 3, 0), false).scale = Vector3(s * 1.15, 1.2, s * 1.15)
+
+
+## Soft snow drift (no collision, same look as the map's own drifts).
+static func snow_drift(root: Node3D, x: float, z: float, s: float) -> void:
+	var sm := SphereMesh.new()
+	sm.radius = s
+	sm.height = s * 0.7
+	sm.radial_segments = 16
+	sm.rings = 6
+	mesh_node(root, sm, pbr("snow_02", Color.WHITE, 0.5), Vector3(x, -0.05, z), Vector3(0, rng.randf() * 3, 0), false).scale = Vector3(1.8, 0.55, 1.2)
+
+
+## Freshly dug grave: dirt mound, dark pit and a spade stuck in the mound (cemetery).
+static func open_grave(root: Node3D, x: float, z: float, rot: float) -> void:
+	var n := Node3D.new()
+	n.position = Vector3(x, 0, z)
+	n.rotation.y = rot
+	root.add_child(n)
+	var dirt := pbr("brown_mud_leaves_01", Color(0.6, 0.5, 0.42), 0.8, 0.0, false)
+	var sm := SphereMesh.new()
+	sm.radius = 0.7
+	sm.height = 0.7
+	sm.is_hemisphere = true
+	sm.radial_segments = 14
+	sm.rings = 5
+	mesh_node(n, sm, dirt, Vector3(0.75, 0, 0), Vector3.ZERO, false).scale = Vector3(0.8, 0.75, 1.5)
+	var pit := PlaneMesh.new()
+	pit.size = Vector2(0.95, 2.0)
+	mesh_node(n, pit, colm(Color(0.02, 0.018, 0.015), 1.0), Vector3(-0.35, 0.015, 0), Vector3.ZERO, false)
+	for e in [[-0.35, -1.05, 1.15, 0.12], [-0.35, 1.05, 1.15, 0.12], [-0.88, 0.0, 0.12, 2.2], [0.18, 0.0, 0.12, 2.2]]:
+		blk(n, e[0], 0, e[1], e[2], 0.08, e[3], dirt, false, 0.03).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if has_model("rusted_spade_01"):
+		prop(n, "rusted_spade_01", 0.75, 0.3, rng.randf_range(-0.6, 0.6), 1.0, -0.2, false, Vector3(0.22, 0, -0.15))
+	_solid(root, x, z, Vector3(2.0, 0.5, 2.3) if absf(sin(rot)) < 0.5 else Vector3(2.3, 0.5, 2.0))
+
+
+static func ambience(root: Node3D, i: int) -> void:
+	var paper := [Color(0.85, 0.83, 0.78), Color(0.55, 0.42, 0.28), Color(0.62, 0.62, 0.6), Color(0.75, 0.7, 0.55)]
+	var g := AMB_GAP
+	match i:
+		0:   # Ciudad Rota: street furniture along the sidewalks, wrecks, junk and stains
+			_amb_at(i, [[-5.6, -36, PI / 2], [5.6, -26, -PI / 2], [5.6, 24, -PI / 2], [-5.6, 40, PI / 2], [-46, -22.4, 0.0], [22, -11.6, PI], [44, -11.6, PI]], 0.9,
+				func(x: float, z: float, r: float) -> void: bench(root, x, z, r))
+			_amb_at(i, [[5.4, -40], [-5.4, -24], [-5.4, 15], [5.4, 33], [-22, -22.3], [-52, -11.7], [14, -22.3], [52, -11.7]], 0.6,
+				func(x: float, z: float, r: float) -> void: hydrant(root, x, z))
+			_amb_scatter(i, 6, 0.4 + g, true, func(x: float, z: float) -> void: utility_box(root, x, z, rng.randf() * TAU))
+			_amb_scatter(i, 5, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 6, 0.7 + g, true, func(x: float, z: float) -> void: trash_bags(root, x, z))
+			_amb_scatter(i, 4, 0.8 + g, true, func(x: float, z: float) -> void: pallet(root, x, z, 1 + rng.randi() % 3))
+			_amb_scatter(i, 3, 2.0 + g, true, func(x: float, z: float) -> void: fence_run(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2, 4.5, true))
+			_amb_at(i, [[-30, -19.6, 0.0], [38, -14.4, 0.0], [-2.0, -38, PI / 2]], 3.2,
+				func(x: float, z: float, r: float) -> void: car(root, x, z, r, Color.from_hsv(rng.randf(), 0.35, 0.35), false, []))
+			stains(root, i, 14, "oil", 0.8, 1.8)
+			stains(root, i, 8, "scorch", 1.6, 3.0)
+			litter(root, 420, paper)
+		1:   # Aldea del Desierto: fences, rocks, fallen palms, drums, junk
+			_amb_scatter(i, 5, 2.0 + g, true, func(x: float, z: float) -> void: fence_run(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2, 4.0, false))
+			_amb_scatter(i, 3, 1.6 + g, true, func(x: float, z: float) -> void: log_down(root, x, z, rng.randf() * TAU, 0.9))
+			_amb_scatter(i, 10, 0.7 + g, true, func(x: float, z: float) -> void: rock(root, x, z, rng.randf_range(0.3, 0.6), pbr("dark_rock", Color(1.1, 0.95, 0.8), 0.45)))
+			_amb_scatter(i, 5, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 5, 0.6 + g, true, func(x: float, z: float) -> void: clay_pots(root, x, z))
+			_amb_scatter(i, 3, 0.8 + g, true, func(x: float, z: float) -> void: hay_bale(root, x, z))
+			_amb_scatter(i, 3, 0.7 + g, true, func(x: float, z: float) -> void: trash_bags(root, x, z))
+			_amb_at(i, [[-44, 20, 0.0], [20, 46, PI / 2]], 3.2,
+				func(x: float, z: float, r: float) -> void: car(root, x, z, r, Color(0.6, 0.55, 0.45), false, []))
+			stains(root, i, 6, "scorch", 1.6, 2.8)
+			stains(root, i, 6, "oil", 0.8, 1.4)
+			litter(root, 200, [Color(0.85, 0.8, 0.7), Color(0.55, 0.42, 0.28)])
+			grass_tufts(root, Vector3.ZERO, Vector2(56, 56), 220, Color(1.0, 0.85, 0.5))
+		2:   # Puerto Helado: quay junk, sandbag nests, drums, drifts, hydrants
+			_amb_at(i, [[-30, -40.5], [30, -40.5], [-50, -40.5], [50, -40.5], [-4, 22]], 0.6,
+				func(x: float, z: float, r: float) -> void: hydrant(root, x, z))
+			_amb_scatter(i, 6, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 5, 0.4 + g, true, func(x: float, z: float) -> void: utility_box(root, x, z, rng.randf() * TAU))
+			_amb_scatter(i, 4, 0.6 + g, true, func(x: float, z: float) -> void: tires(root, x, z))
+			_amb_scatter(i, 4, 0.8 + g, true, func(x: float, z: float) -> void: snowy_crates(root, x, z))
+			_amb_scatter(i, 3, 2.0 + g, true, func(x: float, z: float) -> void: fence_run(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2, 4.5, true))
+			_amb_scatter(i, 3, 2.2 + g, true, func(x: float, z: float) -> void: sandbags(root, [[x, z, 3.6, 0.8] if rng.randf() < 0.5 else [x, z, 0.8, 3.6]]))
+			_amb_scatter(i, 18, 1.4, false, func(x: float, z: float) -> void: snow_drift(root, x, z, rng.randf_range(0.5, 1.2)), 2.0)
+			stains(root, i, 12, "oil", 1.0, 2.2)
+			stains(root, i, 4, "scorch", 1.6, 2.6)
+			litter(root, 120, [Color(0.85, 0.83, 0.78), Color(0.55, 0.42, 0.28)])
+		3:   # Pueblo Olvidado: broken fences, fallen trunks, bones, blood, leaves
+			_amb_scatter(i, 4, 2.0 + g, true, func(x: float, z: float) -> void: fence_run(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2, 4.0, false))
+			_amb_scatter(i, 3, 1.6 + g, true, func(x: float, z: float) -> void: log_down(root, x, z, rng.randf() * TAU, 0.9))
+			_amb_scatter(i, 3, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 2, 0.9 + g, true, func(x: float, z: float) -> void: bench(root, x, z, rng.randf() * TAU))
+			bones(root, i, 10)
+			stains(root, i, 10, "blood", 0.9, 2.0)
+			stains(root, i, 4, "scorch", 1.6, 2.6)
+			litter(root, 120, paper, 320)
+			grass_tufts(root, Vector3.ZERO, Vector2(37, 37), 260, Color(0.6, 0.62, 0.4))
+		4:   # Fábrica Abandonada: oil, cones, barriers, fences, junk, weeds in the cracks
+			_amb_scatter(i, 5, 0.4 + g, true, func(x: float, z: float) -> void: utility_box(root, x, z, rng.randf() * TAU))
+			_amb_scatter(i, 5, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 3, 2.0 + g, true, func(x: float, z: float) -> void: fence_run(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2, 4.5, true))
+			_amb_scatter(i, 3, 1.1 + g, true, func(x: float, z: float) -> void: jersey(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2))
+			_amb_scatter(i, 8, 0.3 + g, false, func(x: float, z: float) -> void: cone(root, x, z))
+			_amb_scatter(i, 4, 0.7 + g, true, func(x: float, z: float) -> void: trash_bags(root, x, z))
+			bones(root, i, 6)
+			stains(root, i, 16, "oil", 1.0, 2.4)
+			stains(root, i, 8, "blood", 0.9, 1.8)
+			litter(root, 260, paper)
+			grass_tufts(root, Vector3.ZERO, Vector2(37, 37), 140, Color(0.55, 0.6, 0.4))
+		5:   # Base Ártica: snow-capped supplies, sandbag nests, drums, drifts against the walls
+			_amb_scatter(i, 6, 0.8 + g, true, func(x: float, z: float) -> void: snowy_crates(root, x, z))
+			_amb_scatter(i, 4, 0.8 + g, true, func(x: float, z: float) -> void: drums(root, x, z))
+			_amb_scatter(i, 3, 2.2 + g, true, func(x: float, z: float) -> void: sandbags(root, [[x, z, 3.6, 0.8] if rng.randf() < 0.5 else [x, z, 0.8, 3.6]]))
+			_amb_scatter(i, 2, 0.5 + g, true, func(x: float, z: float) -> void: gas_bottles(root, x, z))
+			_amb_scatter(i, 2, 0.8 + g, true, func(x: float, z: float) -> void: pallet(root, x, z, 1 + rng.randi() % 3))
+			_amb_scatter(i, 2, 1.6 + g, true, func(x: float, z: float) -> void: log_down(root, x, z, rng.randf() * TAU, 0.9))
+			_amb_scatter(i, 3, 0.4 + g, true, func(x: float, z: float) -> void: utility_box(root, x, z, rng.randf() * TAU))
+			for k in 28:   # drifts piled against the outer wall
+				var a := rng.randf_range(-ZH + 2, ZH - 2)
+				var side := rng.randi() % 4
+				var p: Vector2 = [Vector2(a, -ZH + 1.0), Vector2(a, ZH - 1.0), Vector2(-ZH + 1.0, a), Vector2(ZH - 1.0, a)][side]
+				if is_free(p.x, p.y, 0.6):
+					snow_drift(root, p.x, p.y, rng.randf_range(0.7, 1.4))
+			bones(root, i, 5)
+			stains(root, i, 10, "blood", 0.9, 1.8)
+			stains(root, i, 6, "oil", 0.8, 1.6)
+		6:   # Cementerio: open graves, benches, urns, fallen trunks, broken tombs, bones, leaves
+			_amb_scatter(i, 5, 1.2 + g, true, func(x: float, z: float) -> void: open_grave(root, x, z, 0.0 if rng.randf() < 0.5 else PI / 2))
+			_amb_at(i, [[-2.8, -20, PI / 2], [2.8, -26, -PI / 2], [-2.8, 22, PI / 2], [2.8, 28, -PI / 2], [-22, 2.8, 0.0], [24, -2.8, PI]], 0.9,
+				func(x: float, z: float, r: float) -> void: bench(root, x, z, r))
+			_amb_scatter(i, 5, 0.6 + g, true, func(x: float, z: float) -> void: clay_pots(root, x, z))
+			_amb_scatter(i, 3, 1.6 + g, true, func(x: float, z: float) -> void: log_down(root, x, z, rng.randf() * TAU, 0.9))
+			_amb_scatter(i, 3, 0.8 + g, true, func(x: float, z: float) -> void: rubble_pile(root, x, z, rng.randf_range(0.6, 0.9)))
+			bones(root, i, 12)
+			stains(root, i, 10, "blood", 0.9, 2.0)
+			litter(root, 40, [Color(0.85, 0.83, 0.78)], 420, false)
+			for q in [[-26, -26], [26, -26], [-26, 26], [26, 26]]:
+				grass_tufts(root, Vector3(q[0], 0, q[1]), Vector2(11, 10), 140, Color(0.5, 0.55, 0.42))
+
+
+## More props on every map (after ambience, same free-ground rules): cover-sized junk and debris.
+static func extra_props(root: Node3D, i: int) -> void:
+	var g := AMB_GAP
+	var rot := func() -> float: return 0.0 if rng.randf() < 0.5 else PI / 2
+	var dump := func(x: float, z: float) -> void:
+		dumpster(root, x, z, rot.call())
+		trash_bags(root, x + 1.8, z + 0.6)
+	var pal := func(x: float, z: float) -> void: pallet(root, x, z, 1 + rng.randi() % 3)
+	var tir := func(x: float, z: float) -> void: tires(root, x, z)
+	var jer := func(x: float, z: float) -> void: jersey(root, x, z, rot.call())
+	var gas := func(x: float, z: float) -> void: gas_bottles(root, x, z)
+	var rub := func(x: float, z: float) -> void: rubble_pile(root, x, z, rng.randf_range(0.7, 1.2))
+	var con := func(x: float, z: float) -> void: cone(root, x, z)
+	var dru := func(x: float, z: float) -> void: drums(root, x, z)
+	# zombie maps: boarded-up barricades and abandoned (burnt-out) cars
+	var bar := func(x: float, z: float) -> void: barricade(root, x, z, rot.call() + rng.randf_range(-0.25, 0.25))
+	var wreck := func(x: float, z: float) -> void: car(root, x, z, rot.call() + rng.randf_range(-0.3, 0.3), Color.from_hsv(rng.randf(), 0.3, 0.3), rng.randf() < 0.4, [])
+	var plan := []   # [count, radius, fn]
+	match i:
+		0:
+			plan = [[4, 2.0, dump], [5, 0.8, tir], [4, 1.1, jer], [4, 0.8, pal], [3, 0.6, gas], [4, 1.2, rub], [6, 0.3, con]]
+		1:
+			plan = [[6, 0.8, pal], [4, 0.8, tir], [3, 0.6, gas], [4, 1.2, rub], [4, 0.8, dru],
+				[6, 0.8, func(x: float, z: float) -> void: rock(root, x, z, rng.randf_range(0.4, 0.8), pbr("dark_rock", Color(1.1, 0.95, 0.8), 0.45))]]
+		2:
+			plan = [[5, 0.8, pal], [4, 1.1, jer], [4, 0.6, gas], [3, 2.0, dump], [6, 0.3, con], [3, 0.8, tir]]
+		3:
+			plan = [[3, 2.0, dump], [4, 0.8, tir], [3, 0.8, pal], [4, 1.2, rub], [2, 0.8, dru],
+				[4, 1.4, bar], [2, 3.2, wreck], [3, 0.8, func(x: float, z: float) -> void: hay_bale(root, x, z)]]
+		4:
+			plan = [[4, 0.8, pal], [3, 0.8, tir], [3, 2.0, dump], [3, 0.6, gas], [3, 1.2, rub], [3, 1.1, jer],
+				[3, 1.4, bar], [2, 3.2, wreck], [3, 0.8, dru]]
+		5:
+			plan = [[4, 0.8, pal], [3, 0.6, gas], [3, 0.8, dru], [3, 1.1, jer], [4, 0.8, func(x: float, z: float) -> void: snowy_crates(root, x, z)],
+				[2, 3.2, wreck], [3, 0.8, tir], [3, 2.2, func(x: float, z: float) -> void: sandbags(root, [[x, z, 3.6, 0.8] if rng.randf() < 0.5 else [x, z, 0.8, 3.6]])]]
+		6:
+			plan = [[4, 1.0, func(x: float, z: float) -> void: dead_tree(root, x, z, rng.randf_range(0.8, 1.2))],
+				[3, 1.2, func(x: float, z: float) -> void: open_grave(root, x, z, rot.call())], [4, 1.2, rub],
+				[3, 0.6, func(x: float, z: float) -> void: clay_pots(root, x, z)], [2, 0.8, tir],
+				[3, 1.4, bar], [2, 1.0, func(x: float, z: float) -> void: headstones(root, x - 1.0, z - 0.6, 2, 2, pbr("chipped_concrete", Color(0.62, 0.62, 0.6), 1.2, 0.0, false))]]
+	for q in plan:
+		_amb_scatter(i, q[0], float(q[1]) + g, true, q[2])
 
 
 # ================================================================ ground detail decals
@@ -2570,9 +3646,17 @@ static func build_arctic(root: Node3D, buy_names := {}) -> Array:
 		cm.height = rng.randf_range(25, 55)
 		cm.radial_segments = 7
 		mesh_node(root, cm, white, Vector3(cos(a) * r, cm.height * 0.45, sin(a) * r), Vector3(0, rng.randf() * 3, 0), false)
+	# barracks and stores outside the fence (lit windows)
+	var snowroof := pbr("snow_02", Color(0.95, 0.97, 1.0), 0.5)
+	for q in [[-50, -22, 7, 14], [-51, 18, 7, 14], [50, -20, 7, 14], [51, 24, 7, 14], [-18, -50, 14, 7], [22, -51, 14, 7], [-20, 51, 14, 7]]:
+		bg_house(root, q[0], q[1], q[2], q[3], _wrng.randf_range(5.0, 6.4), wallm, snowroof, 0.35)
 	for i in 50:
 		var a := rng.randf() * TAU
-		pine(root, cos(a) * rng.randf_range(48, 85), sin(a) * rng.randf_range(48, 85), rng.randf_range(1.3, 2.2), true)
+		var px := cos(a) * rng.randf_range(48, 85)
+		var pz := sin(a) * rng.randf_range(48, 85)
+		var ps := rng.randf_range(1.3, 2.2)
+		if not _bg_hit(px, pz):
+			pine(root, px, pz, ps, true)
 	# courtyard: heli pad + supply crates
 	disc(root, Vector3(0, 0.0, -3), 4.5, 0.04, pbr("concrete_floor_01", Color(0.6, 0.62, 0.66), 0.3))
 	var hm := colm(Color(0.9, 0.85, 0.2), 0.6)
@@ -2589,6 +3673,7 @@ static func build_arctic(root: Node3D, buy_names := {}) -> Array:
 	quonset(root, -28, -2, 9.0, 2.6, false, hut, plate)
 	# radar dome on a tower (north) + antenna mast (south)
 	blk(root, 0, 0, -32, 4, 6, 4, plate, true, 0.1)
+	facade(0, -32, 4, 4, 0.4, 6, "nsew", 3.2, 3.3, true, 0.6)
 	var dome := SphereMesh.new()
 	dome.radius = 3.4
 	dome.height = 6.8
@@ -2735,9 +3820,16 @@ static func build_cemetery(root: Node3D, buy_names := {}) -> Array:
 	for q in [[-26, -26], [26, -26], [-26, 26], [26, 26]]:
 		flat(root, Vector3(q[0], 0.008, q[1]), Vector2(24, 22), grassm)
 	zring(root, wallm, inner, buy_names)
+	# a few houses of the village beyond the cemetery wall (lit windows)
+	for q in [[-50, -14, 9, 8], [-52, 14, 8, 10], [50, -8, 10, 8], [-14, -52, 10, 8], [18, 52, 9, 8]]:
+		bg_house(root, q[0], q[1], q[2], q[3], _wrng.randf_range(5.8, 7.0), stone2, roofm, 0.25)
 	for i in 45:
 		var a := rng.randf() * TAU
-		dead_tree(root, cos(a) * rng.randf_range(46, 80), sin(a) * rng.randf_range(46, 80), rng.randf_range(1.2, 2.0))
+		var tx := cos(a) * rng.randf_range(46, 80)
+		var tz := sin(a) * rng.randf_range(46, 80)
+		var ts := rng.randf_range(1.2, 2.0)
+		if not _bg_hit(tx, tz):
+			dead_tree(root, tx, tz, ts)
 	# courtyard: angel statue + benches + lanterns
 	blk(root, 0, 0, -2, 2.4, 0.8, 2.4, stone2, true, 0.08)
 	blk(root, 0, 0.8, -2, 0.8, 2.2, 0.8, stone2, true, 0.1)
@@ -2759,9 +3851,10 @@ static func build_cemetery(root: Node3D, buy_names := {}) -> Array:
 		building(root, m[0], m[1], m[2], m[3], 3.6, {"s": [[0, "d"]]} if m[1] < 0 else {"n": [[0, "d"]]}, stone2, stone)
 		roof(root, m[0], m[1], m[2], m[3], 3.6, roofm)
 		lamp_light(root, Vector3(m[0], 1.2, m[1]), Color(1.0, 0.55, 0.25), 1.4, 5.0)
-	building(root, 2, 31, 12, 9, 6.0, {"n": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]]}, stone2, stone)
+	building(root, 2, 31, 12, 9, 6.0, {"n": [[0, "d"]], "e": [[0, "w"]], "w": [[0, "w"]], "s": [[-3, "w"], [3, "w"]]}, stone2, stone)
 	roof(root, 2, 31, 12, 9, 6.0, roofm)
 	blk(root, 10, 0, 36, 3, 12, 3, stone2, true, 0.1)
+	facade(10, 36, 3, 3, 6.0, 12.0, "nsew", 2.0, 3.3, true, 0.6, 0.7, 1.4, 0.8)
 	var spire := CylinderMesh.new()
 	spire.top_radius = 0.0
 	spire.bottom_radius = 2.2
@@ -2789,7 +3882,8 @@ static func build_cemetery(root: Node3D, buy_names := {}) -> Array:
 
 
 # ================================================================ perk icons (drawn into images, used on machines and the HUD)
-const PERK_COL := {"armor": Color(0.25, 0.55, 1.0), "hands": Color(0.3, 1.0, 0.45), "pulse": Color(1.0, 0.35, 0.25), "forge": Color(1.0, 0.7, 0.2)}
+const PERK_COL := {"armor": Color(0.25, 0.55, 1.0), "hands": Color(0.3, 1.0, 0.45), "pulse": Color(1.0, 0.35, 0.25), "forge": Color(1.0, 0.7, 0.2),
+	"stride": Color(0.95, 0.85, 0.2), "sling": Color(0.75, 0.5, 0.3), "wind": Color(0.35, 0.85, 1.0), "caliber": Color(0.75, 0.35, 1.0)}
 static var _icons := {}
 
 
@@ -2820,6 +3914,14 @@ static func perk_icon(kind: String) -> ImageTexture:
 			shape = [Vector2(26, 30), Vector2(52, 30), Vector2(52, 20), Vector2(72, 40), Vector2(52, 60), Vector2(52, 50), Vector2(26, 50)]
 		"pulse":
 			shape = [Vector2(54, 18), Vector2(30, 52), Vector2(46, 52), Vector2(40, 78), Vector2(66, 42), Vector2(50, 42), Vector2(58, 18)]
+		"stride":
+			shape = [Vector2(28, 24), Vector2(46, 24), Vector2(68, 48), Vector2(46, 72), Vector2(28, 72), Vector2(50, 48)]
+		"wind":
+			shape = [Vector2(42, 22), Vector2(54, 22), Vector2(54, 42), Vector2(74, 42), Vector2(74, 54), Vector2(54, 54), Vector2(54, 74), Vector2(42, 74), Vector2(42, 54), Vector2(22, 54), Vector2(22, 42), Vector2(42, 42)]
+		"caliber":
+			shape = [Vector2(40, 76), Vector2(40, 40), Vector2(48, 20), Vector2(56, 40), Vector2(56, 76)]
+		"sling":
+			shape = [Vector2(22, 60), Vector2(60, 22), Vector2(74, 34), Vector2(36, 74)]
 		"forge":
 			shape = [Vector2(24, 40), Vector2(72, 40), Vector2(64, 52), Vector2(54, 52), Vector2(58, 72), Vector2(38, 72), Vector2(42, 52), Vector2(32, 52)]
 	for y in n:

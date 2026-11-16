@@ -1,5 +1,6 @@
 extends CharacterBody3D
 const SHP := preload("res://scripts/shapes.gd")
+const GLASS := preload("res://scripts/glass.gd")
 const OPT := preload("res://scripts/optimize.gd")
 const OPS := preload("res://scripts/operators.gd")
 const RIG := preload("res://scripts/rig.gd")
@@ -54,12 +55,41 @@ var label_col := Color(1.0, 0.45, 0.35)
 var net_pos := Vector3.ZERO
 var net_yaw := 0.0
 var net_pitch := 0.0
+var aim_pitch_out := 0.0
+var step_d := 0.0          # distance walked since the last footstep sound   # host bots: aim pitch streamed to the clients' puppets
 var net_aim := false
 var net_t := 0.0
 var op := -1              # operator look (multiplayer puppets / menu preview); -1 = enemy soldier
 var MM := {}              # per-instance material overrides
 var R := {}               # Mixamo body (rig.gd): node, skel, ap, aim; empty = procedural body
 var _prev := Vector3.ZERO
+# ---- smarter AI (Operación soldiers and multiplayer bots)
+var bot_id := 0           # >0: multiplayer bot simulated by the host (net.gd), fights players and other bots
+var bot_wpn := 0          # bot's weapon (index of player.weapons) for damage / fire rate
+var max_hp := 100.0
+var target = null         # player / puppet / bot being fought
+var target_t := 0.0
+var last_known := Vector3.ZERO
+var intel_t := -99.0      # game.clock when the target was last seen (by us or a squadmate)
+var share_t := 0.0
+var role := 0             # 0 assault, 1 flanker (goes around), 2 support (holds and suppresses)
+var flank_side := 1.0
+var cover_pos := Vector3.ZERO
+var cover_state := 0      # 0 none, 1 moving to cover, 2 in cover
+var cover_t := 0.0
+var cover_cd := 0.0
+var nades := 1
+var nade_cd := 6.0
+var hit_by := 0           # set by whoever damages a bot right before take_damage (net id)
+var killer_id := 0
+var stuck_t := 0.0
+var detour := Vector3.ZERO
+var suppress := 0.0       # bullets passing close by (player.fire): seek cover, aim slower
+var flee_t := 0.0         # running from a live grenade
+var flee_check_t := 0.0
+var flee_pos := Vector3.ZERO
+var nade_at := Vector3.ZERO
+var detour_t := 0.0
 
 static var M := {}
 static var ME := {}
@@ -178,8 +208,18 @@ func _ready() -> void:
 	seed = randf() * 10.0
 	health = 100.0 + (wave - 1) * 4.0
 	speed = minf(3.0 + wave * 0.12, 4.6)
-	reaction = randf_range(0.35, 0.8) / game.DIFF_ACC[game.settings.diff]
+	reaction = randf_range(0.35, 0.8) / _acc()
 	fire_t = randf_range(0.3, 1.0)
+	role = [0, 0, 1, 2][randi() % 4]
+	flank_side = -1.0 if randf() < 0.5 else 1.0
+	nades = 1 if randf() < 0.6 else 0
+	nade_cd = randf_range(5.0, 12.0)
+	if bot_id > 0:
+		health = 100.0
+		speed = 4.2
+		nades = 2
+		role = randi() % 3
+	max_hp = health
 	var cs := CollisionShape3D.new()
 	var cap := CapsuleShape3D.new()
 	cap.radius = 0.35
@@ -189,6 +229,7 @@ func _ready() -> void:
 	add_child(cs)
 	if puppet:
 		health = 1.0e9
+	if puppet or bot_id > 0:
 		var lab := Label3D.new()
 		lab.text = display_name
 		lab.font_size = 42
@@ -210,10 +251,18 @@ func _ready() -> void:
 
 ## Horizontal direction of the next nav path point towards the player (ZERO when the path is done).
 func _path_dir(pl: Node3D) -> Vector3:
+	return _path_to(pl.global_position)
+
+
+var _path_goal := Vector3.INF
+
+
+func _path_to(goal: Vector3) -> Vector3:
 	repath_t -= get_physics_process_delta_time()
-	if repath_t <= 0.0:
+	if repath_t <= 0.0 or _path_goal.distance_to(goal) > 2.0:
 		repath_t = 0.4
-		agent.target_position = pl.global_position
+		_path_goal = goal
+		agent.target_position = goal
 	if agent.is_navigation_finished():
 		return Vector3.ZERO
 	var mv := agent.get_next_path_position() - global_position
@@ -326,7 +375,8 @@ func _animate_skin(delta: float, moved: float, aiming: bool, aim_pitch: float, r
 	var d := global_position - _prev
 	_prev = global_position
 	var local := Basis(Vector3.UP, facing).inverse() * d
-	crouch_k = lerpf(crouch_k, 1.0 if crouch_pref and aiming else 0.0, 1.0 - exp(-6.0 * delta))
+	var firing: bool = game.clock - last_shot < 0.9 or burst > 0 or (aiming and fire_t < 0.35 and not puppet)
+	crouch_k = lerpf(crouch_k, 1.0 if crouch_pref and aiming and not firing else 0.0, 1.0 - exp(-(10.0 if firing else 6.0) * delta))
 	aim_k = lerpf(aim_k, 1.0 if aiming and reload_t <= 0.0 else 0.0, 1.0 - exp(-8.0 * delta))
 	hit_k = maxf(0.0, hit_k - delta * 5.0)
 	kick = maxf(0.0, kick - delta * 10.0)
@@ -441,14 +491,37 @@ func take_damage(d: float, head: bool) -> bool:
 		hit_dir = -1.0 if randf() < 0.5 else 1.0
 		game.net.send_hit(peer_id, d, head)
 		return false
+	if bot_id > 0:
+		# friendly fire between bots / host player on the same team is ignored
+		var att: int = hit_by if hit_by != 0 else int(game.net.my_id())
+		if att != bot_id and game.net.same_team(att, bot_id):
+			return false
+		killer_id = att
 	health -= d
 	hit_k = 1.0
 	hit_dir = -1.0 if randf() < 0.5 else 1.0
 	seen_t = maxf(seen_t, reaction * 0.5)
+	# turn towards whoever shot us, even without line of sight
+	var src = _attacker_node()
+	if src != null:
+		last_known = src.global_position
+		intel_t = game.clock
+		if bot_id > 0 and (target == null or not los):
+			target = src
+	# hurt: break off and look for cover soon
+	if health < max_hp * 0.5 and cover_state == 0:
+		cover_cd = minf(cover_cd, 0.2)
 	if health <= 0.0:
 		_die(head)
 		return true
 	return false
+
+
+## The node that hit us last (operation soldiers: always the player).
+func _attacker_node():
+	if bot_id == 0:
+		return game.player if game.player and is_instance_valid(game.player) else null
+	return game.net.node_of(killer_id)
 
 
 func _die(head: bool) -> void:
@@ -463,6 +536,10 @@ func _die(head: bool) -> void:
 	gun.reparent(game.world)
 	gun_vel = Vector3(randf_range(-1, 1), randf_range(1, 2), randf_range(-1, 1))
 	gun_spin = Vector3(randf_range(-5, 5), randf_range(-3, 3), randf_range(-5, 5))
+	if bot_id > 0:
+		# multiplayer bot: the host announces the death (kill credit goes through net.died)
+		game.net.bot_died(bot_id, killer_id, head, bool(game.kill_ctx.get("melee", false)) if game.kill_ctx else false)
+		return
 	game.register_kill(head)
 	game.drop_loot(global_position)
 
@@ -495,6 +572,7 @@ func _puppet_process(delta: float) -> void:
 	rotation.y = facing
 	var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
 	_animate(delta, moved, net_aim or crouch_pref, clampf(net_pitch, -0.8, 0.8), 0.0)
+	_footsteps(moved)
 	flash_t -= delta
 	flash.visible = flash_t > 0.0
 
@@ -504,42 +582,271 @@ func _exit_tree() -> void:
 		gun.queue_free()
 
 
+## 3D footsteps for soldiers, bots and remote players (you hear them coming round the corner).
+func _footsteps(moved: float) -> void:
+	if collision_layer == 0 or moved > 2.0:
+		return   # our own third-person body (the player plays its own steps) / teleports
+	step_d += moved
+	var stride := 1.5 if crouch_k < 0.5 else 1.0
+	if step_d < stride:
+		return
+	step_d = 0.0
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or cam.global_position.distance_to(global_position) > 32.0:
+		return
+	var run: bool = moved > 0.07
+	game.sfx.step(game.sfx.surface_at(global_position, game.map_idx), (-9.0 if run else -13.0) - (6.0 if crouch_k > 0.5 else 0.0), global_position + Vector3(0, 0.1, 0))
+
+
+## Accuracy multiplier: difficulty for Operación, bot skill in multiplayer.
+func _acc() -> float:
+	if bot_id > 0:
+		return [0.65, 1.0, 1.4][clampi(int(game.settings.get("bot_skill", 1)), 0, 2)]
+	return game.DIFF_ACC[game.settings.diff]
+
+
+# ---- target helpers: the local player (alive/eye_height), a remote puppet or another bot (dead)
+func _t_alive(t) -> bool:
+	if t == null or not is_instance_valid(t):
+		return false
+	if t.get("alive") != null:
+		return bool(t.alive)
+	return not bool(t.dead)
+
+
+func _t_eye(t) -> Vector3:
+	if t.has_method("eye_height"):
+		return t.global_position + Vector3(0, t.eye_height(), 0)
+	var cr: float = float(t.get("crouch_k")) if t.get("crouch_k") != null else 0.0
+	return t.global_position + Vector3(0, 1.6 - cr * 0.4, 0)
+
+
 func _has_los(pl) -> bool:
-	var from := global_position + Vector3(0, 1.7, 0)
-	var to: Vector3 = pl.global_position + Vector3(0, pl.eye_height() - 0.1, 0)
+	var from := global_position + Vector3(0, 1.7 - crouch_k * 0.4, 0)
+	var to: Vector3 = _t_eye(pl) - Vector3(0, 0.1, 0)
 	var q := PhysicsRayQueryParameters3D.create(from, to, 1, [get_rid()])
 	return get_world_3d().direct_space_state.intersect_ray(q).is_empty()
 
 
+## Bots: pick the nearest enemy, preferring the ones in sight (re-evaluated twice a second).
+func _pick_target(delta: float) -> void:
+	if bot_id == 0:
+		target = game.player
+		return
+	target_t -= delta
+	if target_t > 0.0 and _t_alive(target):
+		return
+	target_t = 0.5
+	var best = null
+	var bs := 1.0e9
+	for c in game.net.bot_enemies(bot_id):
+		if not _t_alive(c):
+			continue
+		var d: float = global_position.distance_to(c.global_position)
+		var score := d
+		if d < 70.0 and _has_los(c):
+			score *= 0.4
+		if c == target:
+			score *= 0.8
+		if score < bs:
+			bs = score
+			best = c
+	target = best
+
+
+## Damage a target with the right attribution (player, remote player, bot).
+func _deal(t, dmg: float, head: bool, from: Vector3) -> void:
+	if not _t_alive(t):
+		return
+	if t == game.player:
+		if bot_id > 0:
+			game.net.last_attacker = bot_id
+			game.net.last_head = head
+			game.net.last_melee = false
+			t.take_damage(dmg, from)
+		else:
+			game.damage_player(dmg, from)
+	elif t.get("puppet") == true:
+		game.net.bot_hit_peer(t.peer_id, bot_id, dmg, head, from)
+	elif t.has_method("take_damage"):
+		t.hit_by = bot_id
+		t.take_damage(dmg, head)
+		t.hit_by = 0
+
+
+const BOT_DMG := [[22.0, 0.095], [55.0, 0.85], [24.0, 0.2], [17.0, 0.075], [80.0, 1.3], [22.0, 0.1]]
+
+
 func _shoot(dist: float, pl) -> void:
-	var acc: float = game.DIFF_ACC[game.settings.diff]
+	var acc: float = _acc()
 	var chance := (0.4 - dist * 0.0045) * acc * (1.0 + wave * 0.03)
-	var ps := Vector2(pl.velocity.x, pl.velocity.z).length()
+	var pv = pl.get("velocity")
+	var ps := Vector2(pv.x, pv.z).length() if pv != null else 0.0
 	if ps > 6.0:
 		chance *= 0.55
 	elif ps > 3.0:
 		chance *= 0.8
-	if pl.crouch > 0.5:
+	if float(pl.get("crouch") if pl.get("crouch") != null else 0.0) > 0.5:
 		chance *= 0.75
-	if absf(pl.lean) > 0.5:
+	if absf(float(pl.get("lean") if pl.get("lean") != null else 0.0)) > 0.5:
 		chance *= 0.8
-	chance = clampf(chance, 0.05, 0.75)
+	# moving while shooting / just out of cover spoils the aim a little
+	if Vector2(velocity.x, velocity.z).length() > 2.0:
+		chance *= 0.85
+	if suppress > 2.5:
+		chance *= 0.7
+	if bot_id > 0 and bot_wpn == 1:
+		chance = clampf(1.1 - dist / 14.0, 0.0, 0.9) * acc   # shotgun: deadly up close only
+	chance = clampf(chance, 0.04, 0.8)
 	flash_t = 0.05
 	kick = 1.0
 	ammo -= 1
 	last_shot = game.clock
+	if "--aidbg" in OS.get_cmdline_user_args() and R != null:
+		print("AISHOT d=%.1f clip=%s aim_k=%.2f gait=%.2f crouch=%.2f" % [dist, (R.ap as AnimationPlayer).current_animation, aim_k, gait, crouch_k])
 	var from := tip.global_position
-	var target: Vector3 = pl.camera.global_position - Vector3(0, 0.25, 0)
+	var aim_at: Vector3 = _t_eye(pl) - Vector3(0, 0.25, 0)
 	var hit := randf() < chance
 	if not hit:
-		target += Vector3(randf_range(-1.2, 1.2), randf_range(-0.6, 0.9), randf_range(-1.2, 1.2))
-	game.fx.tracer(from, target)
+		# a near miss: the tracer passes close to the target (aimed fire, not random spray)
+		var side := Vector3(randf_range(-1, 1), randf_range(-0.6, 0.8), randf_range(-1, 1)).normalized()
+		aim_at += side * randf_range(0.35, 0.9) * (1.0 + dist / 60.0)
+	game.fx.tracer(from, aim_at)
+	# their rounds break window glass on the way too
+	if GLASS.current != null and is_instance_valid(GLASS.current):
+		var gq := PhysicsRayQueryParameters3D.create(from, aim_at, GLASS.GLASS_LAYER)
+		var gh := get_world_3d().direct_space_state.intersect_ray(gq)
+		if not gh.is_empty():
+			GLASS.current.shatter(GLASS.pane_of(gh.collider), aim_at - from)
 	game.fx.flash_light(from, 2.0, 5.0)
 	game.sfx.play3d("enemy", from, -2.0)
+	if bot_id > 0:
+		game.net.bot_fx(bot_id, aim_at)
 	if hit:
-		game.damage_player(randf_range(6, 10), global_position)
-	elif dist < 30.0 and randf() < 0.5:
+		if bot_id > 0:
+			var head := randf() < 0.12 * acc
+			var bd: float = BOT_DMG[bot_wpn][0] * (2.0 if head else 1.0)
+			_deal(pl, bd, head, global_position)
+		else:
+			_deal(pl, randf_range(6, 10), false, global_position)
+	elif pl == game.player and dist < 30.0 and randf() < 0.5:
 		game.sfx.play("whiz", -10)
+
+
+## Distances for the weapon: [too close, ideal, max engagement range].
+func _ranges() -> Array:
+	if bot_id == 0:
+		return [7.0, 28.0 if role == 2 else 20.0, 60.0]
+	return [[7.0, 20.0, 48.0], [2.0, 6.0, 18.0], [5.0, 12.0, 30.0], [4.0, 11.0, 34.0], [15.0, 38.0, 85.0], [8.0, 22.0, 52.0]][clampi(bot_wpn, 0, 5)]
+
+
+## Closest live grenade thrown by an enemy within blast reach (null if none).
+func _nearest_nade():
+	var best = null
+	var bd := 7.5
+	for g in get_tree().get_nodes_in_group("live_nade"):
+		if not is_instance_valid(g):
+			continue
+		var owner_id: int = int(g.get_meta("owner", -1))
+		# Operación soldiers ignore their own team's grenades; bots ignore their own and their team's
+		if bot_id == 0 and owner_id == 0:
+			continue
+		if bot_id > 0 and owner_id > 0 and game.net.same_team(owner_id, bot_id):
+			continue
+		var d: float = (g as Node3D).global_position.distance_to(global_position)
+		if d < bd:
+			bd = d
+			best = (g as Node3D).global_position
+	if best != null:
+		nade_at = best
+	return best
+
+
+## Gunshot heard (player.fire, unsilenced): we know roughly where the shooter is.
+func hear(pos: Vector3) -> void:
+	if dead or puppet:
+		return
+	if global_position.distance_to(pos) < 45.0 and game.clock - intel_t > 1.0:
+		last_known = pos + Vector3(randf_range(-3, 3), 0, randf_range(-3, 3))
+		intel_t = game.clock
+
+
+## Squad intel: soldiers near us (same side) learn where the target is.
+func _share_intel(pos: Vector3) -> void:
+	if game.clock - share_t < 0.6:
+		return
+	share_t = game.clock
+	for e in game.enemies:
+		if e == self or not is_instance_valid(e) or e.dead or e.get("puppet") == true or not e.has_method("_share_intel"):
+			continue
+		if e.bot_id != 0 and not game.net.same_team(e.bot_id, bot_id):
+			continue
+		if (bot_id == 0) != (e.bot_id == 0):
+			continue
+		if e.global_position.distance_to(global_position) < 32.0 and game.clock - e.intel_t > 0.5:
+			e.last_known = pos
+			e.intel_t = game.clock
+
+
+## A spot within reach that the target can't see (behind a wall/crate), reachable on the nav mesh.
+func _find_cover(from_pos: Vector3) -> Variant:
+	var space := get_world_3d().direct_space_state
+	var best = null
+	var bd := 1.0e9
+	var map_rid := get_world_3d().navigation_map
+	for i in 14:
+		var a := TAU * i / 14.0 + randf() * 0.3
+		var r := randf_range(3.0, 9.0)
+		var p := global_position + Vector3(cos(a) * r, 0, sin(a) * r)
+		p = NavigationServer3D.map_get_closest_point(map_rid, p)
+		if p.distance_to(global_position) < 1.5 or absf(p.y - global_position.y) > 1.0:
+			continue
+		# hidden at crouch height from the target's eye
+		var q := PhysicsRayQueryParameters3D.create(from_pos, p + Vector3(0, 1.1, 0), 1, [get_rid()])
+		if space.intersect_ray(q).is_empty():
+			continue
+		# don't run towards the enemy to reach it
+		var cost := p.distance_to(global_position) + maxf(0.0, 12.0 - p.distance_to(from_pos)) * 1.5
+		if cost < bd:
+			bd = cost
+			best = p
+	return best
+
+
+## Lob a grenade to where the target was last seen (it is hiding behind cover).
+func _throw_nade(at: Vector3) -> void:
+	nades -= 1
+	var g := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.06
+	sm.height = 0.12
+	g.mesh = sm
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.2, 0.25, 0.16)
+	g.material_override = m
+	game.add_child(g)
+	g.add_to_group("live_nade")
+	g.set_meta("owner", bot_id)
+	var from := global_position + Vector3(0, 1.8, 0)
+	at += Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)) / _acc()
+	g.global_position = from
+	game.sfx.play3d("pin", from, -2.0)
+	var dur := clampf(from.distance_to(at) / 14.0, 0.6, 1.6)
+	var tw: Tween = game.create_tween()
+	tw.tween_method(func(k: float):
+		if is_instance_valid(g):
+			g.global_position = from.lerp(at, k) + Vector3(0, sin(k * PI) * (2.0 + dur * 2.0), 0)
+	, 0.0, 1.0, dur)
+	var me_id := bot_id
+	var me := self
+	var gm = game
+	gm.get_tree().create_timer(dur + 1.1, false).timeout.connect(func():
+		if is_instance_valid(g):
+			g.queue_free()
+		gm.enemy_nade_blast(at + Vector3(0, 0.1, 0), me_id, me)
+	)
+
+
 
 
 func _leg_pose(ph: float, g: float, c: float) -> void:
@@ -625,7 +932,6 @@ func _death_anim() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	var pl = game.player
 	if dead:
 		dead_t += delta
 		_death_anim()
@@ -645,18 +951,32 @@ func _physics_process(delta: float) -> void:
 	if puppet:
 		_puppet_process(delta)
 		return
-	if pl == null or not is_instance_valid(pl):
-		return
+	_pick_target(delta)
+	var pl = target
 	if not is_on_floor():
 		velocity.y -= 20.0 * delta
-	var to: Vector3 = pl.global_position - global_position
+	if pl == null or not is_instance_valid(pl):
+		# nobody to fight (multiplayer bot with every enemy dead): stand by
+		velocity.x = 0.0
+		velocity.z = 0.0
+		move_and_slide()
+		_animate(delta, 0.0, false, 0.0, 0.0)
+		rotation.y = facing
+		return
+	var tpos: Vector3 = pl.global_position
+	var to: Vector3 = tpos - global_position
 	to.y = 0.0
 	var dist := to.length()
 	var n := to / maxf(dist, 0.001)
+	var wr0: Array = _ranges()
 	los_t -= delta
 	if los_t <= 0.0:
 		los_t = randf_range(0.15, 0.25)
-		los = pl.alive and dist < 75.0 and _has_los(pl)
+		los = _t_alive(pl) and dist < (75.0 if bot_id == 0 else float(wr0[2]) + 15.0) and _has_los(pl)
+		if los:
+			last_known = tpos
+			intel_t = game.clock
+			_share_intel(tpos)
 	if los:
 		seen_t += delta
 	else:
@@ -665,53 +985,177 @@ func _physics_process(delta: float) -> void:
 		reload_t -= delta
 		if reload_t <= 0.0:
 			ammo = 30
+	nade_cd -= delta
+	cover_cd -= delta
+	suppress = maxf(0.0, suppress - delta * 0.8)
 	var mv := Vector3.ZERO
 	var spd := speed
-	if los:
-		facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 10.0))
-		if dist > 20.0:
-			mv = n
-		elif dist < 7.0:
-			mv = -n
-		strafe_t -= delta
-		if strafe_t <= 0.0:
-			strafe = [-1, 0, 0, 1][randi() % 4]
-			strafe_t = randf_range(0.8, 2.2)
-			crouch_pref = dist > 14.0 and randf() < 0.45
-		if crouch_pref:
-			strafe = 0
-		mv += Vector3(-n.z, 0, n.x) * strafe
-		spd *= 0.0 if crouch_pref else 0.6
-		# player on another floor (seen through a stairwell / window), or we are on the stairs:
-		# keep pushing along the path while firing instead of holding position mid-flight
-		var on_ramp := is_on_floor() and get_floor_normal().y < 0.97
-		if absf(pl.global_position.y - global_position.y) > 1.5 or on_ramp:
-			var pm := _path_dir(pl)
-			if pm != Vector3.ZERO:
-				mv = pm
-				spd = speed * 0.75
-		if seen_t > reaction and reload_t <= 0.0:
-			if ammo <= 0:
-				reload_t = reload_dur
-			else:
-				fire_t -= delta
-				if fire_t <= 0.0:
-					if burst > 0:
-						_shoot(dist, pl)
-						burst -= 1
-						fire_t = 0.13
-					else:
-						burst = 3 + randi() % 3
-						fire_t = randf_range(0.7, 1.6)
-	else:
-		mv = _path_dir(pl)
+	var hurt := health < max_hp * 0.5
+	var wr: Array = _ranges()     # [too close, ideal, max engagement distance]
+	# ---- a live grenade lands nearby: drop everything and sprint away from it
+	flee_check_t -= delta
+	if flee_check_t <= 0.0 and flee_t <= 0.0:
+		flee_check_t = 0.2
+		var nd = _nearest_nade()
+		if nd != null:
+			var away: Vector3 = global_position - nd
+			away.y = 0.0
+			if away.length() < 0.2:
+				away = -n
+			flee_pos = NavigationServer3D.map_get_closest_point(get_world_3d().navigation_map, global_position + away.normalized() * 9.0)
+			flee_t = randf_range(1.6, 2.2)
+			cover_state = 0
+			crouch_pref = false
+			burst = 0
+	if flee_t > 0.0:
+		flee_t -= delta
+		mv = _path_to(flee_pos)
 		if mv == Vector3.ZERO:
-			mv = n
+			mv = Vector3(global_position.x - nade_at.x, 0, global_position.z - nade_at.z).normalized()
+		spd = speed * 1.45
+	else:
+		# ---- cover: hurt, pinned down by fire or reloading -> a spot the target can't see; support
+		# and long-range shooters also like to fight from cover even when healthy
+		var want_cover: bool = hurt or suppress > 2.5 or (reload_t > 0.0 and dist < 25.0) or (role == 2 and randf() < 0.004)
+		if cover_state == 0 and cover_cd <= 0.0 and los and dist < 50.0 and want_cover:
+			cover_cd = 2.5
+			var cp = _find_cover(_t_eye(pl))
+			if cp != null:
+				cover_pos = cp
+				cover_state = 1
+				cover_t = 3.0
+		if cover_state == 1:
+			cover_t -= delta
+			mv = _path_to(cover_pos)
+			spd = speed * 1.15
+			if global_position.distance_to(cover_pos) < 0.7 or mv == Vector3.ZERO or cover_t <= 0.0:
+				cover_state = 2
+				cover_t = randf_range(2.0, 3.5)
+		elif cover_state == 2:
+			cover_t -= delta
+			crouch_pref = true
+			strafe = 0
+			# patch up a bit while hidden
+			health = minf(max_hp * 0.75, health + 8.0 * delta)
+			if cover_t <= 0.0 and reload_t <= 0.0 and suppress < 2.0:
+				cover_state = 0
+				cover_cd = randf_range(4.0, 7.0)
+				crouch_pref = false
+		if cover_state == 0 and los:
+			facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 8.0))
+			# keep the distance that suits the weapon: close in when too far, back off when too close
+			if dist > float(wr[2]):
+				mv = _path_dir(pl)
+				if mv == Vector3.ZERO:
+					mv = n
+			elif dist > float(wr[1]) + 6.0:
+				mv = n
+			elif dist < float(wr[0]):
+				mv = -n
+			strafe_t -= delta
+			if strafe_t <= 0.0:
+				strafe = [-1, 0, 0, 1][randi() % 4] if role != 1 else [-1, 1][randi() % 2]
+				strafe_t = randf_range(0.8, 2.2)
+				crouch_pref = dist > 14.0 and randf() < (0.6 if role == 2 else 0.4)
+			if crouch_pref:
+				strafe = 0
+			mv += Vector3(-n.z, 0, n.x) * strafe
+			spd *= 0.0 if crouch_pref and dist <= float(wr[2]) else 0.6
+			# player on another floor (seen through a stairwell / window), or we are on the stairs:
+			# keep pushing along the path while firing instead of holding position mid-flight
+			var on_ramp := is_on_floor() and get_floor_normal().y < 0.97
+			if absf(tpos.y - global_position.y) > 1.5 or on_ramp:
+				var pm := _path_dir(pl)
+				if pm != Vector3.ZERO:
+					mv = pm
+					spd = speed * 0.75
+		elif cover_state == 0:
+			crouch_pref = false
+			# ---- no line of sight: hunt where the target was last seen or heard (ours or a squadmate's),
+			# flankers swing wide around it; with no intel for a while, fall back to the real position
+			var fresh: bool = game.clock - intel_t < 8.0
+			var goal: Vector3 = last_known if fresh else tpos
+			# while a squadmate keeps the target busy, flankers and assaulters go around it
+			var pinned_by_mate: bool = fresh and game.clock - intel_t < 1.0 and not los
+			if (role == 1 or (pinned_by_mate and role == 0)) and dist > 12.0 and fresh:
+				var side := Vector3(-n.z, 0, n.x) * flank_side * minf(12.0, dist * 0.55)
+				var fg := goal + side
+				if global_position.distance_to(fg) > 3.0:
+					goal = fg
+			if fresh and global_position.distance_to(last_known) < 2.0:
+				intel_t = -99.0
+			mv = _path_to(goal)
+			if mv == Vector3.ZERO:
+				mv = n
+			# moving carefully once close to where the target was (no sprinting into the open)
+			if fresh and global_position.distance_to(last_known) < 12.0:
+				spd = speed * 0.7
+			# target hiding nearby behind cover: lob a grenade at its last position
+			if nades > 0 and nade_cd <= 0.0 and game.clock - intel_t < 4.0 and last_known.distance_to(global_position) > 7.0 and last_known.distance_to(global_position) < 26.0:
+				nade_cd = randf_range(10.0, 18.0)
+				if randf() < 0.55:
+					_throw_nade(last_known)
+	# ---- firing: only once the gun is up and pointed at the target (no shots from the hip while
+	# turning), aiming takes longer the farther away it is, and only inside the weapon's range
+	var aim_err := absf(wrapf(atan2(-n.x, -n.z) - facing, -PI, PI))
+	# the allowed error shrinks with distance (~0.5 m off at the target), so far shots are really aimed
+	var aim_tol := clampf(atan2(0.5, maxf(dist, 1.0)), 0.025, 0.18)
+	var far_shot := dist > 16.0
+	# the burst clock runs while the target is in sight (it used to stop while turning, and planting
+	# the feet below waits on it)
+	if los and fire_t > -1.0:
+		fire_t -= delta
+	# at range they plant their feet for the burst (they still advance between bursts): no firing while
+	# walking / strafing (the walk clips carry the rifle low, so it looked like spraying from the hip)
+	# (not when the target is on another floor or we are on the stairs: then they keep walking the path)
+	var other_floor: bool = absf(tpos.y - global_position.y) > 1.5 or (is_on_floor() and get_floor_normal().y < 0.97)
+	var skinned := not R.is_empty()
+	var hold := (far_shot or skinned) and los and flee_t <= 0.0 and cover_state == 0 and reload_t <= 0.0 and seen_t > reaction \
+		and not other_floor and ((burst > 0 and fire_t < 0.5) or (burst == 0 and fire_t <= 0.0)) and dist <= float(wr[2])
+	if hold:
+		mv = Vector3.ZERO
+		strafe = 0
+		facing = lerp_angle(facing, atan2(-n.x, -n.z), minf(1.0, delta * 10.0))
+	var steady: bool = (not far_shot and not skinned) or other_floor or Vector2(velocity.x, velocity.z).length() < 0.8
+	var aimed: bool = aim_err < aim_tol and aim_k > (0.9 if far_shot else 0.75) and steady and (not skinned or crouch_k < 0.35 or other_floor)
+	var settle: float = reaction + dist * 0.015 + (0.4 if suppress > 2.5 else 0.0)
+	if los and flee_t <= 0.0 and cover_state != 1 and seen_t > settle and reload_t <= 0.0 and aimed and dist <= float(wr[2]):
+		if ammo <= 0:
+			reload_t = reload_dur
+		else:
+			if fire_t <= 0.0:
+				if burst > 0:
+					_shoot(dist, pl)
+					burst -= 1
+					fire_t = 0.13 if bot_id == 0 else maxf(BOT_DMG[bot_wpn][1], 0.09)
+				else:
+					burst = (3 + randi() % 3) if role != 2 else (5 + randi() % 4)
+					# far away: short controlled bursts
+					if dist > 35.0:
+						burst = 2 + randi() % 2
+					if bot_id > 0 and bot_wpn in [1, 2, 4]:
+						burst = 1 + randi() % 2
+					fire_t = (randf_range(0.7, 1.6) if role != 2 else randf_range(0.4, 1.0)) + dist * 0.01
+	elif cover_state == 2 and ammo <= 0 and reload_t <= 0.0:
+		reload_t = reload_dur
+	# keep a little room from squadmates (two soldiers walking into each other block forever)
+	for e in game.enemies:
+		if e == self or not is_instance_valid(e) or e.dead or e.get("puppet") == true:
+			continue
+		var dd: Vector3 = global_position - e.global_position
+		dd.y = 0.0
+		var dl := dd.length()
+		if dl < 1.1 and dl > 0.001:
+			mv += dd / dl * (1.1 - dl) * 2.5
+	if detour_t > 0.0:
+		detour_t -= delta
+		mv = detour
+		spd = maxf(spd, speed * 0.8)
 	if mv.length() > 0.01 and spd > 0.0:
 		mv = mv.normalized()
 		velocity.x = mv.x * spd
 		velocity.z = mv.z * spd
-		if not los:
+		if not los or cover_state == 1:
 			facing = lerp_angle(facing, atan2(-mv.x, -mv.z), minf(1.0, delta * 8.0))
 	else:
 		velocity.x = 0.0
@@ -721,7 +1165,22 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	_step_up(before, want)
 	var moved := Vector2(global_position.x - before.x, global_position.z - before.z).length()
-	var aim_pitch := atan2(pl.global_position.y + pl.eye_height() - 0.3 - (global_position.y + 1.5 - crouch_k * 0.36), dist)
+	_footsteps(moved)
+	# stuck against something for a while: pick a sideways detour
+	if want.length() > 0.02 and moved < want.length() * 0.2:
+		stuck_t += delta
+		if stuck_t > 0.6:
+			stuck_t = 0.0
+			repath_t = 0.0
+			flank_side = -flank_side
+			# step sideways (and a bit back) for a moment, then try the path again
+			var w2 := want.normalized()
+			detour = (Vector3(-w2.z, 0, w2.x) * flank_side - w2 * 0.4).normalized()
+			detour_t = randf_range(0.5, 0.9)
+	else:
+		stuck_t = 0.0
+	var aim_pitch := atan2(_t_eye(pl).y - 0.3 - (global_position.y + 1.5 - crouch_k * 0.36), dist)
+	aim_pitch_out = aim_pitch if los else 0.0
 	_animate(delta, moved, los, clampf(aim_pitch, -0.8, 0.8), clampf(wrapf(atan2(-n.x, -n.z) - facing, -PI, PI), -0.8, 0.8))
 	rotation.y = facing
 	flash_t -= delta

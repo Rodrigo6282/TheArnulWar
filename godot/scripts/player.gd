@@ -5,7 +5,11 @@ extends CharacterBody3D
 const WM := preload("res://scripts/weapon_models.gd")
 const OPT := preload("res://scripts/optimize.gd")
 const FPA := preload("res://scripts/fp_arms.gd")
+const ARM := preload("res://scripts/armory.gd")
+const GLASS := preload("res://scripts/glass.gd")
 const GRAV := 20.0
+const TPS_OFF := Vector3(0.62, 0.28, 2.7)      # third person: camera over the right shoulder (head space)
+const TPS_AIM := Vector3(0.5, 0.12, 1.35)      # ... closer while aiming
 const LEAN_DIST := 0.55
 
 var game
@@ -40,6 +44,10 @@ var land_off := 0.0
 var land_v := 0.0
 var was_on_floor := true
 var shake := 0.0
+var tps := false            # third-person camera (H / OPCIONES)
+var tps_k := 0.0
+var tps_body = null         # soldier.gd puppet that shows our own body in third person
+var tps_fire_t := -9.0
 var step_t := 0.0
 var step_last := 0
 var mouse_down := false
@@ -65,22 +73,27 @@ var pump_t := 0.0
 
 var weapons := [
 	{"name": "AR-7 Fusil de asalto", "short": "Fusil", "auto": true, "rate": 0.095, "dmg": 30.0, "head": 2.0, "falloff": [35.0, 90.0, 0.75], "mag": 30, "reserve_max": 180, "reload": 2.0,
-		"spread": 0.016, "aim_spread": 0.003, "pellets": 1, "recoil": 0.011, "range": 220.0, "fov": 52.0, "snd": "rifle", "ammo": 30, "reserve": 180},
+		"spread": 0.016, "aim_spread": 0.003, "pellets": 1, "recoil": 0.011, "range": 220.0, "fov": 52.0, "snd": "rifle", "ammo": 30, "reserve": 180, "zmul": 1.6},
 	{"name": "M-12 Escopeta", "short": "Escopeta", "auto": false, "rate": 0.85, "dmg": 15.0, "head": 1.5, "mag": 6, "reserve_max": 36, "reload": 2.5,
-		"spread": 0.07, "aim_spread": 0.05, "pellets": 9, "recoil": 0.05, "range": 45.0, "fov": 65.0, "snd": "shotgun", "ammo": 6, "reserve": 36, "falloff": [8.0, 30.0, 0.25]},
+		"spread": 0.07, "aim_spread": 0.05, "pellets": 9, "recoil": 0.05, "range": 45.0, "fov": 65.0, "snd": "shotgun", "ammo": 6, "reserve": 36, "falloff": [8.0, 30.0, 0.25], "zmul": 1.7},
 	{"name": "P9 Pistola", "short": "Pistola", "auto": false, "rate": 0.16, "dmg": 34.0, "head": 2.2, "falloff": [15.0, 50.0, 0.6], "mag": 12, "reserve_max": 72, "reload": 1.3,
-		"spread": 0.014, "aim_spread": 0.004, "pellets": 1, "recoil": 0.022, "range": 120.0, "fov": 60.0, "snd": "pistol", "ammo": 12, "reserve": 72},
+		"spread": 0.014, "aim_spread": 0.004, "pellets": 1, "recoil": 0.022, "range": 120.0, "fov": 60.0, "snd": "pistol", "ammo": 12, "reserve": 72, "zmul": 1.5},
 	{"name": "V-9 Subfusil", "short": "Subfusil", "auto": true, "rate": 0.07, "dmg": 24.0, "head": 1.8, "mag": 32, "reserve_max": 192, "reload": 1.7,
-		"spread": 0.022, "aim_spread": 0.006, "pellets": 1, "recoil": 0.008, "range": 120.0, "fov": 58.0, "snd": "smg", "ammo": 32, "reserve": 192, "falloff": [15.0, 45.0, 0.55], "move": 1.05},
+		"spread": 0.022, "aim_spread": 0.006, "pellets": 1, "recoil": 0.008, "range": 120.0, "fov": 58.0, "snd": "smg", "ammo": 32, "reserve": 192, "falloff": [15.0, 45.0, 0.55], "move": 1.05, "zmul": 1.7},
 	{"name": "R-700 Francotirador", "short": "Francotirador", "auto": false, "rate": 1.2, "dmg": 120.0, "head": 2.5, "mag": 5, "reserve_max": 30, "reload": 2.6,
-		"spread": 0.06, "aim_spread": 0.0, "pellets": 1, "recoil": 0.07, "range": 400.0, "fov": 16.0, "snd": "sniper", "ammo": 5, "reserve": 30, "scope": true, "move": 0.9, "pierce": true},
+		"spread": 0.06, "aim_spread": 0.0, "pellets": 1, "recoil": 0.07, "range": 400.0, "fov": 16.0, "snd": "sniper", "ammo": 5, "reserve": 30, "scope": true, "move": 0.9, "pierce": true, "zmul": 2.5},
 	{"name": "K-90 Ametralladora", "short": "Ametralladora", "auto": true, "rate": 0.1, "dmg": 32.0, "head": 1.8, "falloff": [40.0, 100.0, 0.8], "mag": 75, "reserve_max": 300, "reload": 3.6,
-		"spread": 0.032, "aim_spread": 0.008, "pellets": 1, "recoil": 0.012, "range": 200.0, "fov": 55.0, "snd": "lmg", "ammo": 75, "reserve": 300, "move": 0.82},
+		"spread": 0.032, "aim_spread": 0.008, "pellets": 1, "recoil": 0.012, "range": 200.0, "fov": 55.0, "snd": "lmg", "ammo": 75, "reserve": 300, "move": 0.82, "zmul": 1.5},
 ]
 var owned: Array = [0, 1, 2, 3, 4, 5]
+var base_fov := 75.0          # OPCIONES field of view
 var max_health := 100.0
 var reload_mul := 1.0
 var rate_mul := 1.0
+var move_mul := 1.0        # perk Zancada
+var dmg_mul := 1.0         # perk Calibre
+var max_guns := 2          # perk Bandolera: 3
+var second_wind := false   # perk Segundo Aliento: get back up once
 var knife_node: Node3D
 var melee_t := 0.0
 var melee_done := false
@@ -92,6 +105,8 @@ var throw_done := false
 var nade_node: Node3D
 var nade_left: Node3D          # where the left Mixamo arm rests (out of frame) during a throw
 const MELEE_DUR := 0.5
+var _glass_t := 0.0
+var _glass_prev := Vector3.ZERO
 const THROW_DUR := 0.7
 # climbing (mantle onto ledges) and vaulting through windows
 var climb_t := -1.0          # >= 0 while a climb/vault is playing
@@ -144,7 +159,8 @@ func _ready() -> void:
 	head.position.y = 1.65
 	add_child(head)
 	camera = Camera3D.new()
-	camera.fov = 75.0
+	base_fov = clampf(float(game.settings.get("fov", 75.0)), 60.0, 100.0)
+	camera.fov = base_fov
 	camera.near = 0.03
 	camera.far = 700.0
 	head.add_child(camera)
@@ -168,6 +184,10 @@ func _ready() -> void:
 		fp_arms = FPA.new()
 		fp_arms.build(camera, opd.body, opd.tint)
 	for i in guns.size():
+		# ARMERO: attachments, camo and upgrade levels chosen in the menu
+		var ac: Dictionary = ARM.cfg(game.settings, i)
+		ARM.apply_stats(weapons[i], ac, i)
+		ARM.dress(guns[i], i, ac)
 		holder.add_child(guns[i].model)
 		guns[i].model.visible = i == 0
 		_store_homes(guns[i])
@@ -191,6 +211,8 @@ func _ready() -> void:
 	muzzle_light.light_energy = 0.0
 	muzzle_light.position = Vector3(0.2, -0.1, -1.0)
 	camera.add_child(muzzle_light)
+	if bool(game.settings.get("tps", false)):
+		call_deferred("set_tps", true, true)
 
 
 func _store_homes(g: Dictionary) -> void:
@@ -222,9 +244,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			spectate_next()
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var s: float = 0.0022 * game.settings.sens * (maxf(0.25, camera.fov / 75.0) if aim_k > 0.5 else 1.0)
+		var s: float = 0.0022 * game.settings.sens * ((maxf(0.25, camera.fov / base_fov) * float(game.settings.get("ads_sens", 1.0))) if aim_k > 0.5 else 1.0)
 		yaw -= event.relative.x * s
-		pitch = clampf(pitch - event.relative.y * s, -1.5, 1.5)
+		var dy: float = -event.relative.y if bool(game.settings.get("invert_y", false)) else event.relative.y
+		pitch = clampf(pitch - dy * s, -1.5, 1.5)
 		sway.x = clampf(sway.x - event.relative.x * 0.0004, -0.04, 0.04)
 		sway.y = clampf(sway.y + event.relative.y * 0.0004, -0.04, 0.04)
 	elif event is InputEventMouseButton:
@@ -248,6 +271,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				throw_grenade()
 			KEY_B:
 				game.use_streak()
+			KEY_H:
+				set_tps(not tps)
+				game.settings["tps"] = tps
+				game.save_settings()
 			KEY_F:
 				game.interact()
 			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
@@ -257,6 +284,71 @@ func _unhandled_input(event: InputEvent) -> void:
 						switch_weapon(owned[slot])
 				elif slot in owned:
 					switch_weapon(slot)
+
+
+# ---------------------------------------------------------------- third-person camera
+func set_tps(on: bool, quiet := false) -> void:
+	tps = on
+	if on and (tps_body == null or not is_instance_valid(tps_body)):
+		var SS = load("res://scripts/soldier.gd")
+		var bd = SS.new()
+		bd.game = game
+		bd.puppet = true
+		bd.op = int(game.settings.get("op", 0))
+		bd.display_name = ""
+		game.add_child(bd)
+		# only a picture of us: no collisions, never a target
+		bd.collision_layer = 0
+		bd.collision_mask = 0
+		bd.global_position = global_position
+		bd.net_pos = global_position
+		bd.facing = yaw
+		bd.visible = false
+		tps_body = bd
+	if not quiet:
+		game.ui.notice("", "Cámara en tercera persona (H)" if on else "Cámara en primera persona (H)", 1.2)
+
+
+func _update_tps(delta: float) -> void:
+	var w: Dictionary = weapons[cur]
+	# the sniper scope (and inspecting) always go to first person
+	var want: bool = tps and alive and not inspect_on and not (w.get("scope", false) and aim_k > 0.3)
+	tps_k = lerpf(tps_k, 1.0 if want else 0.0, 1.0 - exp(-10.0 * delta))
+	if not want and tps_k < 0.01:
+		tps_k = 0.0
+	var on := tps_k > 0.5
+	holder.visible = not on
+	if on:
+		knife_node.visible = false
+		nade_node.visible = false
+	if tps_body != null and is_instance_valid(tps_body):
+		tps_body.visible = tps_k > 0.05 and alive
+		tps_body.net_pos = global_position
+		tps_body.net_yaw = yaw
+		tps_body.net_pitch = clampf(pitch, -0.8, 0.8)
+		tps_body.net_aim = aim_k > 0.3 or game.clock - tps_fire_t < 0.8 or mouse_down
+		tps_body.crouch_pref = crouch > 0.5
+		tps_body.reload_t = 1.0 if reloading else 0.0
+		if not tps_body.visible:
+			tps_body.global_position = global_position
+	if tps_k <= 0.0 or camera.top_level:
+		camera.position = Vector3.ZERO
+		return
+	var off: Vector3 = TPS_OFF.lerp(TPS_AIM, aim_k) * tps_k
+	var local: Vector3 = Basis(Vector3.RIGHT, pitch) * off
+	# keep the camera out of walls: pull it in along the line from the head
+	var from := head.global_position
+	var to: Vector3 = head.to_global(local)
+	var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(from, to, 1, [get_rid()]))
+	if not hit.is_empty():
+		var d: float = maxf(0.0, from.distance_to(hit.position) - 0.25)
+		local = local.normalized() * minf(d, local.length())
+	camera.position = local
+
+
+func _exit_tree() -> void:
+	if tps_body != null and is_instance_valid(tps_body):
+		tps_body.queue_free()
 
 
 # ---------------------------------------------------------------- movement + camera
@@ -272,6 +364,16 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		_spectate(delta)
 		return
+	# window glass breaks when we go through it (vaulting / jumping through the window)
+	_glass_t -= delta
+	if _glass_t <= 0.0:
+		_glass_t = 0.06
+		var gs = GLASS.current
+		if gs != null and is_instance_valid(gs):
+			var gv: Vector3 = (global_position - _glass_prev) / 0.06
+			for hy in [0.5, 1.1, 1.5]:
+				gs.touch(global_position + Vector3(0, hy, 0), gv)
+		_glass_prev = global_position
 	var in_ctrl: bool = game.state == "playing" and not game.ui.chat_open
 	# Space: climb/vault when facing a ledge or window (also while jumping at one), else jump
 	var space_now := Input.is_physical_key_pressed(KEY_SPACE) and in_ctrl
@@ -293,7 +395,7 @@ func _physics_process(delta: float) -> void:
 		mouse_down = false
 	sprinting = Input.is_physical_key_pressed(KEY_SHIFT) and iz > 0.0 and not aiming and not crouching and not mouse_down and is_on_floor()
 	sprint_k = lerpf(sprint_k, 1.0 if sprinting else 0.0, 1.0 - exp(-10.0 * delta))
-	var speed: float = (8.2 if sprinting else (3.4 if aiming else (2.8 if crouching else 5.4))) * weapons[cur].get("move", 1.0)
+	var speed: float = (8.2 if sprinting else (3.4 if aiming else (2.8 if crouching else 5.4))) * weapons[cur].get("move", 1.0) * move_mul
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
 	var right := Vector3(cos(yaw), 0, -sin(yaw))
 	var wish := right * ix + fwd * iz
@@ -313,7 +415,7 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	if is_on_floor() and not was_on_floor and vy < -4.0:
 		land_v -= minf(0.9, -vy * 0.08)
-		game.sfx.play("land", -4, 0.04)
+		game.sfx.play("ld_" + game.sfx.surface_at(global_position, game.map_idx), -4.0 + clampf((-vy - 6.0) * 0.6, 0.0, 4.0), 0.04)
 	was_on_floor = is_on_floor()
 	rotation.y = yaw
 	var hs := Vector2(velocity.x, velocity.z).length()
@@ -322,13 +424,10 @@ func _physics_process(delta: float) -> void:
 		step_t -= delta * hs / 5.4
 		if step_t <= 0.0:
 			step_t = 0.42
-			# never the same sample twice in a row; louder when sprinting, very soft crouched
-			var si := randi() % 5
-			if si >= step_last:
-				si += 1
-			step_last = si
+			# the sound of what is under the feet (wood floors, metal, snow, sand...); never the same
+			# sample twice in a row; louder when sprinting, very soft crouched
 			var vol := -16.0 if crouch > 0.5 else (-8.0 if hs > 6.0 else -11.0)
-			game.sfx.play("step%d" % (si + 1), vol, 0.06)
+			step_last = game.sfx.step(game.sfx.surface_at(global_position, game.map_idx), vol, null, step_last)
 	# lean (Q/E), blocked by walls at the side
 	var lt := float(Input.is_physical_key_pressed(KEY_E)) - float(Input.is_physical_key_pressed(KEY_Q))
 	if sprinting or not in_ctrl:
@@ -364,11 +463,12 @@ func _physics_process(delta: float) -> void:
 	head.position = Vector3(lean * LEAN_DIST + randf_range(-sh, sh), eye_height() - absf(lean) * 0.08 + land_off + randf_range(-sh, sh), 0)
 	camera.rotation = Vector3(pitch + view_kick + randf_range(-sh, sh) * 0.3, 0, -lean * 0.22 + strafe_roll + sin(bob_t * 0.5) * 0.004 * hs * (1.0 - aim_k))
 	var w: Dictionary = weapons[cur]
-	aim_k = lerpf(aim_k, 1.0 if aiming and not sprinting and switch_t <= 0.0 and not reloading else 0.0, 1.0 - exp(-14.0 * delta))
-	var target_fov: float = lerpf(82.0 if sprint_k > 0.5 else 75.0, w.fov, aim_k)
+	aim_k = lerpf(aim_k, 1.0 if aiming and not sprinting and switch_t <= 0.0 and not reloading else 0.0, 1.0 - exp(-14.0 * float(w.get("ads", 1.0)) * delta))
+	var target_fov: float = lerpf(base_fov + 7.0 if sprint_k > 0.5 else base_fov, w.fov * (base_fov / 75.0 if not w.get("scope", false) else 1.0) * w.get("zoom", 1.0), aim_k)
 	cam_attr.dof_blur_near_enabled = aim_k > 0.05 and game.settings.quality >= 1 and not scoped
 	cam_attr.dof_blur_amount = 0.035 * aim_k
 	camera.fov = lerpf(camera.fov, target_fov, 1.0 - exp(-12.0 * delta))
+	_update_tps(delta)
 	if scoped:
 		camera.rotation.x += sin(game.clock * 1.3) * 0.0016
 		camera.rotation.y = sin(game.clock * 0.9) * 0.002
@@ -383,6 +483,8 @@ func _physics_process(delta: float) -> void:
 ## Called on death and on respawn: input released while dead never reaches the player, so without
 ## this you came back still firing / aiming / mid-reload.
 func reset_actions() -> void:
+	if tps_body != null and is_instance_valid(tps_body):
+		tps_body.visible = false
 	mouse_down = false
 	aiming = false
 	sprinting = false
@@ -500,7 +602,7 @@ func _spectate(delta: float) -> void:
 	spec_snap = false
 	camera.top_level = true
 	holder.visible = false
-	camera.fov = lerpf(camera.fov, 75.0, 1.0 - exp(-8.0 * delta))
+	camera.fov = lerpf(camera.fov, base_fov, 1.0 - exp(-8.0 * delta))
 	camera.global_position = spec_pos
 	camera.look_at(headp + look * 12.0, Vector3.UP)
 
@@ -544,12 +646,25 @@ func _try_climb() -> bool:
 		return false
 	var top: float = down.position.y
 	var rise := top - feet.y
+	# the body moves through the air during a climb (no collision), so the path must be really open:
+	# room above the head up to the new height, and nothing between there and the ledge. Without
+	# this, jumping at a second-floor window "climbed" through the lintel onto the roof edge and the
+	# player fell out to the street.
+	var head_from := feet + Vector3(0, 1.0, 0)
+	var head_to := Vector3(feet.x, top + 1.0, feet.z)
+	if head_to.y > head_from.y and not space.intersect_ray(PhysicsRayQueryParameters3D.create(head_from, head_to, 1, rid)).is_empty():
+		return false
+	var over := Vector3(probe.x, top + 1.0, probe.z)
+	if not space.intersect_ray(PhysicsRayQueryParameters3D.create(head_to, over, 1, rid)).is_empty():
+		return false
 	# zombies: never above 2.3 m, so the zone walls (3.6 m) can't be skipped from crates
 	var max_y := 2.3 if game.mode == "zombies" else 99.0
 	# 1) climb onto the top
 	if rise > 0.45 and rise < 2.25 and top <= max_y:
 		var land := Vector3(probe.x, top + 0.03, probe.z) + into * 0.25
 		if _fits(land):
+			if "--climbdbg" in OS.get_cmdline_user_args():
+				print("CLIMB %s feet=%s top=%.2f to=%s" % ["top", str(feet), top, str(land)])
 			_start_climb(Vector3(feet.x, top + 0.12, feet.z), land, 0.32 + rise * 0.2, false)
 			return true
 	# 2) window: clear opening above the sill -> vault through and land on the other side
@@ -561,6 +676,8 @@ func _try_climb() -> bool:
 			if not fl.is_empty() and fl.normal.y > 0.7:
 				var land2 := Vector3(far.x, fl.position.y + 0.03, far.z)
 				if land2.y <= max_y and _fits(land2):
+					if "--climbdbg" in OS.get_cmdline_user_args():
+						print("CLIMB %s feet=%s top=%.2f to=%s" % ["vault", str(feet), top, str(land2)])
 					_start_climb(Vector3(edge.x, top + 0.12, edge.z) - into * 0.15, land2, 0.62, true)
 					return true
 	return false
@@ -652,15 +769,34 @@ func fire() -> void:
 	slide_kick = 1.0
 	if guns[cur].has("pump") and w.ammo > 0:
 		pump_t = 0.001
-	game.sfx.play(w.snd, -1.0, 0.06)
-	flash_t = 0.05
+	# silencer (ARMERO): quieter, lower report and no muzzle flash
+	game.sfx.play(w.snd, -11.0 if w.get("quiet", false) else -1.0, 0.06)
+	flash_t = 0.0 if w.get("quiet", false) else 0.05
 	kick = 1.0
-	_eject_casing(guns[cur].kind == "shell")
+	if tps_k < 0.5:
+		_eject_casing(guns[cur].kind == "shell")
 	var spread := current_spread()
 	var origin := camera.global_position
 	var b := camera.global_transform.basis
 	var fwd := -b.z
 	var muzzle_w := camera.to_global(Vector3(lerpf(0.17, 0.0, aim_k), lerpf(-0.12, -0.06, aim_k), -0.9))
+	if tps_k > 0.5:
+		# third person: the round leaves from the eye towards what the crosshair covers (the camera
+		# sits behind the shoulder, so its own ray could hit things between it and the player)
+		var eye := head.global_position
+		var aim_q := PhysicsRayQueryParameters3D.create(origin, origin + fwd * w.range, 1 | 2, [get_rid()])
+		var ah := get_world_3d().direct_space_state.intersect_ray(aim_q)
+		var aim_pt: Vector3 = ah.position if not ah.is_empty() else origin + fwd * w.range
+		if (aim_pt - eye).dot(fwd) > 0.5:
+			fwd = (aim_pt - eye).normalized()
+			b = Basis.looking_at(fwd, Vector3.UP)
+		origin = eye
+		tps_fire_t = game.clock
+		if tps_body != null and is_instance_valid(tps_body):
+			muzzle_w = tps_body.tip.global_position
+			tps_body.flash_t = 0.0 if w.get("quiet", false) else 0.05
+			tps_body.kick = 1.0
+			tps_body.last_shot = game.clock
 	# light muzzle haze: never while aiming, and only every third round on automatic fire
 	smoke_n += 1
 	if aim_k < 0.5 and (w.rate > 0.15 or smoke_n % 3 == 0):
@@ -672,8 +808,19 @@ func fire() -> void:
 		var r := sqrt(randf()) * spread
 		var dir := (fwd + b.x * cos(a) * r + b.y * sin(a) * r).normalized()
 		var excl := [get_rid()]
-		var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * w.range, 1 | 2, excl)
+		var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * w.range, 1 | 2 | GLASS.GLASS_LAYER, excl)
 		var hit := space.intersect_ray(q)
+		# window glass: the round breaks the pane and carries on
+		for gk in 4:
+			var gpi := GLASS.pane_of(hit.collider) if not hit.is_empty() else -1
+			if gpi < 0:
+				break
+			excl.append(hit.collider.get_rid())
+			if GLASS.current != null:
+				GLASS.current.shatter(gpi, dir)
+			q.exclude = excl
+			hit = space.intersect_ray(q)
+		q.collision_mask = 1 | 2
 		# the sniper round passes through up to two bodies
 		var extra := []
 		if w.get("pierce", false):
@@ -691,13 +838,21 @@ func fire() -> void:
 			game.fx.tracer(muzzle_w, end)
 		if p == 0 and game.net.active:
 			game.net.shot(end)
+		if p == 0:
+			_alert_enemies(origin, end, w.get("quiet", false))
 		if hit.is_empty():
 			continue
 		var col = hit.collider
 		if col.has_method("take_damage"):
 			var rel: float = hit.position.y - col.global_position.y
-			var is_head := rel > 1.5
-			var dmg: float = w.dmg * (float(w.get("head", 2.0)) if is_head else (0.75 if rel < 0.85 else 1.0)) * (1.8 if w.get("up", false) else 1.0)
+			# head height comes from the target (the zombie boss is taller)
+			var hh = col.get("head_h")
+			var head_y: float = float(hh) if hh != null else 1.5
+			var is_head := rel > head_y
+			var dmg: float = w.dmg * (float(w.get("head", 2.0)) if is_head else (0.75 if rel < head_y * 0.57 else 1.0)) * (1.8 if w.get("up", false) else 1.0) * dmg_mul
+			# zombies mode balance: guns hit zombies harder (they soak a lot of damage in later rounds)
+			if game.mode == "zombies" and col.get("round_n") != null:
+				dmg *= float(w.get("zmul", 1.5))
 			if w.has("falloff"):
 				var f: Array = w.falloff
 				dmg *= clampf(1.0 - (hit.position.distance_to(origin) - f[0]) / (f[1] - f[0]) * (1.0 - f[2]), f[2], 1.0)
@@ -714,7 +869,7 @@ func fire() -> void:
 				var c2 = h2.collider
 				if not dmg_map.has(c2):
 					dmg_map[c2] = [0.0, false]
-				dmg_map[c2][0] += w.dmg * (1.8 if w.get("up", false) else 1.0)
+				dmg_map[c2][0] += w.dmg * dmg_mul * (1.8 if w.get("up", false) else 1.0) * (float(w.get("zmul", 1.5)) if game.mode == "zombies" and c2.get("round_n") != null else 1.0)
 				game.fx.blood(h2.position, -dir)
 		else:
 			game.fx.impact(hit.position, hit.normal, col.has_meta("wood"), p < 2)
@@ -744,6 +899,22 @@ func fire() -> void:
 			if cur == idx:
 				start_reload()
 		)
+
+
+## Bullets passing close to soldiers pin them down (suppression); unsilenced shots give away
+## where the player is to anyone within earshot.
+func _alert_enemies(from: Vector3, to: Vector3, quiet: bool) -> void:
+	var seg := to - from
+	var ln2 := maxf(seg.length_squared(), 0.0001)
+	for e in game.enemies:
+		if not is_instance_valid(e) or e.dead or e.get("suppress") == null:
+			continue
+		var c: Vector3 = e.global_position + Vector3(0, 1.2, 0)
+		var k := clampf((c - from).dot(seg) / ln2, 0.0, 1.0)
+		if c.distance_to(from + seg * k) < 2.5:
+			e.suppress = minf(e.suppress + 1.0, 6.0)
+		if not quiet:
+			e.hear(global_position)
 
 
 func _eject_casing(shell: bool) -> void:
@@ -847,7 +1018,7 @@ func give_weapon(i: int, upgraded := false) -> void:
 		if i != cur:
 			switch_weapon(i)
 		return
-	if owned.size() < 2:
+	if owned.size() < max_guns:
 		owned.append(i)
 	else:
 		owned[owned.find(cur)] = i
@@ -896,10 +1067,22 @@ func _spawn_grenade() -> void:
 		mi.material_override = m
 		rb.add_child(mi)
 	game.add_child(rb)
+	# soldiers / bots see it coming and run (soldier._nearest_nade)
+	rb.add_to_group("live_nade")
+	rb.set_meta("owner", game.net.my_id() if game.net.active else -1)
+	# online client: the bots live on the host, tell it where this grenade is about to blow
+	if game.net.active and not game.net.is_host:
+		get_tree().create_timer(0.9, false).timeout.connect(func():
+			if is_instance_valid(rb):
+				game.net.nade_mark(rb.global_position)
+		)
 	var b := camera.global_transform.basis
 	rb.global_position = camera.global_position + b.x * 0.15 - b.z * 0.5 + b.y * 0.05
 	rb.linear_velocity = -b.z * 15.0 + Vector3.UP * 3.5 + velocity * 0.6
 	rb.angular_velocity = Vector3(randf_range(-8, 8), randf_range(-8, 8), randf_range(-8, 8))
+	# bots live on the host: tell it where this grenade is going so they can run from it
+	if game.net.active and not game.net.is_host:
+		game.net.nade_warn(rb.global_position, rb.linear_velocity)
 	get_tree().create_timer(2.3, false).timeout.connect(func():
 		if is_instance_valid(rb):
 			game.explode(rb.global_position, 170.0, 7.5, "grenade")
@@ -937,11 +1120,16 @@ func _melee_hit() -> void:
 	var fwd := -camera.global_transform.basis.z
 	var space := get_world_3d().direct_space_state
 	for off in [Vector3.ZERO, camera.global_transform.basis.x * 0.25, -camera.global_transform.basis.x * 0.25]:
-		var q := PhysicsRayQueryParameters3D.create(origin, origin + (fwd * 2.1 + off), 1 | 2, [get_rid()])
+		var q := PhysicsRayQueryParameters3D.create(origin, origin + (fwd * 2.1 + off), 1 | 2 | GLASS.GLASS_LAYER, [get_rid()])
 		var hit := space.intersect_ray(q)
 		if hit.is_empty():
 			continue
 		var col = hit.collider
+		var gp := GLASS.pane_of(col)
+		if gp >= 0:
+			if GLASS.current != null:
+				GLASS.current.shatter(gp, fwd)
+			return
 		if col.has_method("take_damage"):
 			game.kill_ctx = {"weapon": -1, "melee": true, "last": false, "dist": 1.0, "hp": health}
 			var killed: bool = col.take_damage(160.0, false)
@@ -1058,7 +1246,7 @@ func _update_weapon(delta: float, hs: float) -> void:
 		kp.y -= _sm((mp - 0.7) / 0.3) * 0.4
 		knife_node.position = kp
 		knife_node.rotation = kr
-		knife_node.visible = melee_t > 0.0
+		knife_node.visible = melee_t > 0.0 and tps_k < 0.5
 	else:
 		knife_node.visible = false
 	# grenade throw: wind-up behind the shoulder, then a fast overhand release
@@ -1080,7 +1268,7 @@ func _update_weapon(delta: float, hs: float) -> void:
 		np.y -= _sm((tp - 0.6) / 0.4) * 0.5
 		nade_node.position = np
 		nade_node.rotation = nr
-		nade_node.visible = true
+		nade_node.visible = tps_k < 0.5
 		# the grenade itself leaves the hand at the release
 		for c in nade_node.get_children():
 			if c.has_meta("scan") or c.has_meta("nade"):
@@ -1223,9 +1411,9 @@ func _update_weapon(delta: float, hs: float) -> void:
 	muzzle_light.light_energy = 3.0 if flash_t > 0.0 else 0.0
 	if fp_arms:
 		if throw_t > 0.0 and nade_node.has_meta("rgrip"):
-			fp_arms.update({"model": nade_node, "left": nade_left}, alive and not inspect_on)
+			fp_arms.update({"model": nade_node, "left": nade_left}, alive and not inspect_on and tps_k < 0.5)
 		else:
-			fp_arms.update(g, g.model.visible and not inspect_on and alive)
+			fp_arms.update(g, g.model.visible and not inspect_on and alive and tps_k < 0.5)
 
 
 # ---------------------------------------------------------------- damage
@@ -1239,6 +1427,16 @@ func take_damage(amount: float, from: Vector3) -> void:
 	game.sfx.play("hurt", -3)
 	var d := from - global_position
 	game.ui.damage_from(atan2(-d.x, -d.z) - yaw)
+	if health <= 0.0 and second_wind:
+		# Segundo Aliento: back up once with half health (the perk is used up and can be bought again)
+		second_wind = false
+		health = max_health * 0.5
+		last_hit = game.clock + 2.0
+		if game.zm:
+			game.zm.perks_owned.erase("wind")
+		game.ui.notice("SEGUNDO ALIENTO", "¡Te has vuelto a levantar!", 2.0)
+		game.sfx.play("perk")
+		return
 	if health <= 0.0:
 		health = 0.0
 		alive = false

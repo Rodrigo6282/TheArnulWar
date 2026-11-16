@@ -29,6 +29,10 @@ var box_hold := 0.0
 var box_label: Label3D
 var round_kills := 0
 var box_guns := {}
+const BOSS_EVERY := 7       # El Coloso (boss zombie) on rounds 7, 14, 21...
+var boss_pending := false
+var boss_at := 0
+var round_spawned := 0
 
 
 func setup(g) -> void:
@@ -37,12 +41,19 @@ func setup(g) -> void:
 	L = WB.zlayout
 
 
+## People in the co-op game (1 offline).
+func team_size() -> int:
+	return maxi(1, game.net.players.size()) if game.net.is_coop() else 1
+
+
 func max_alive() -> int:
-	return 14 if game.settings.quality == 0 else 20
+	# bigger teams (up to 12) get a few more zombies on the map at once
+	return (14 if game.settings.quality == 0 else 20) + mini(team_size() - 1, 6) * 2
 
 
 func round_total(r: int) -> int:
-	return 6 if r == 1 else mini(6 + r * 4, 64)
+	var base := 6 if r == 1 else mini(6 + r * 4, 64)
+	return mini(int(base * (1.0 + 0.3 * (team_size() - 1))), 160)
 
 
 func add_points(n: int) -> void:
@@ -66,8 +77,20 @@ func on_hit(z, killed: bool, head: bool) -> void:
 		elif head:
 			pts = 100
 		round_kills += 1
+		if z.get("boss") == true:
+			# El Coloso: big reward (killer 1000, the rest of the team 500) + guaranteed Munición máxima
+			pts = 1000
+			drop_seq += 1
+			spawn_drop(z.global_position, "ammo", drop_seq)
+			game.net.zdrop(drop_seq, z.global_position, "ammo")
+			if game.net.is_coop():
+				for id in game.net.puppets:
+					if id != z.attacker:
+						game.net.zpoints(id, 500, false, false)
+				if z.attacker != 0 and z.attacker != game.net.my_id():
+					add_points(500)
 		# power-up drop
-		if drops_round < 4 and randf() < 0.035:
+		elif drops_round < 4 and randf() < 0.035:
 			drops_round += 1
 			var kind: String = DROPS.keys()[randi() % DROPS.size()]
 			drop_seq += 1
@@ -108,9 +131,12 @@ func client_spawn(id: int, pos: Vector3, fac: float, rnd: int, gait: int, spd: f
 	z.round_n = rnd
 	z.remote = true
 	z.nid = id
+	z.boss = (gait & 16) != 0
 	game.add_child(z)
-	z.gait_kind = gait
+	z.gait_kind = gait & 3
 	z.speed = spd
+	if z.boss:
+		_boss_notice()
 	z.global_position = pos
 	z.net_pos = pos
 	z.facing = fac
@@ -129,7 +155,7 @@ func client_snapshot(arr: Array, rnd: int, left: int, it: float) -> void:
 	for a in arr:
 		var z = find_zombie(int(a[0]))
 		if z == null:
-			z = client_spawn(int(a[0]), a[1], a[2], round_n, int(a[3]) & 3, 2.0)
+			z = client_spawn(int(a[0]), a[1], a[2], round_n, int(a[3]) & (3 | 16), 2.0)
 			z.rise_t = 0.0
 		if not z.dead:
 			z.net_apply(a[1], a[2], int(a[3]))
@@ -209,6 +235,12 @@ func update(delta: float) -> void:
 			round_kills = 0
 			drops_round = 0
 			to_spawn = round_total(round_n)
+			round_spawned = 0
+			boss_pending = is_boss_round(round_n)
+			if boss_pending:
+				# boss rounds: ~70% of the usual horde plus El Coloso (counted in the round)
+				to_spawn = ceili(to_spawn * 0.7) + 1
+				boss_at = int(to_spawn / 3.0)
 			spawn_t = 1.0
 			if round_n > 1:
 				game.player.grenades = mini(game.player.grenades + 2, 4)
@@ -223,18 +255,33 @@ func update(delta: float) -> void:
 	if to_spawn > 0:
 		spawn_t -= delta
 		if spawn_t <= 0.0 and game.alive_count() < max_alive():
-			if _spawn_zombie():
+			# the boss comes once about a third of the round is out (or as the last one)
+			var as_boss := boss_pending and (round_spawned >= boss_at or to_spawn == 1)
+			if _spawn_zombie(as_boss):
 				to_spawn -= 1
+				round_spawned += 1
+				if as_boss:
+					boss_pending = false
 			spawn_t = maxf(0.35, 2.0 - round_n * 0.12)
 	elif game.alive_count() == 0:
 		inter = 9.0
+		game.add_credits(10 + round_n * 5)
 		game.ui.notice("RONDA %d SUPERADA" % round_n, "La siguiente empieza en 9 segundos", 3.5)
 		game.sfx.play("wave")
 		if game.net.is_coop():
 			game.net.rpc("zcleared", round_n)
 
 
-func _spawn_zombie() -> bool:
+func is_boss_round(r: int) -> bool:
+	return r > 0 and r % BOSS_EVERY == 0
+
+
+func _boss_notice() -> void:
+	game.ui.notice("¡JEFE!", "El Coloso ha llegado", 3.5)
+	game.sfx.play("boom", -2)
+
+
+func _spawn_zombie(as_boss := false) -> bool:
 	# spawn around a random living player (in co-op the zombies spread over the whole team)
 	var pp: Vector3 = game.player.global_position
 	if game.net.is_coop():
@@ -263,11 +310,15 @@ func _spawn_zombie() -> bool:
 	var z = ZombieScript.new()
 	z.game = game
 	z.round_n = round_n
+	z.boss = as_boss
 	game.add_child(z)
-	z.global_position = p + Vector3(randf_range(-0.8, 0.8), 0.15, randf_range(-0.8, 0.8))
+	var jit := 0.3 if as_boss else 0.8
+	z.global_position = p + Vector3(randf_range(-jit, jit), 0.15, randf_range(-jit, jit))
 	z.facing = atan2(-(pp.x - p.x), -(pp.z - p.z))
 	game.enemies.append(z)
 	game.net.zspawn(z)
+	if as_boss:
+		_boss_notice()
 	return true
 
 
@@ -361,6 +412,14 @@ func interact() -> void:
 					pl.reload_mul = 0.55
 				"pulse":
 					pl.rate_mul = 0.75
+				"stride":
+					pl.move_mul = 1.18
+				"caliber":
+					pl.dmg_mul = 1.35
+				"sling":
+					pl.max_guns = 3
+				"wind":
+					pl.second_wind = true
 			game.sfx.play("perk")
 			game.ui.notice(r.name.to_upper(), "Ventaja activada", 2.0)
 		"forge":
@@ -578,7 +637,10 @@ func _apply_drop(kind: String, mine := true) -> void:
 			if is_host_side():
 				for e in game.enemies.duplicate():
 					if is_instance_valid(e) and not e.dead and e.get("puppet") != true:
-						e.take_damage(1.0e7, false)
+						if e.has_method("nuke_damage"):
+							e.nuke_damage()   # heavy damage on the boss, never a kill
+						else:
+							e.take_damage(1.0e7, false)
 			if mine:
 				add_points(400)
 

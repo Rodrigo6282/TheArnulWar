@@ -9,8 +9,15 @@ const RIG := preload("res://scripts/rig.gd")
 const SKIN_SH := preload("res://shaders/fp_skin.gdshader")
 const KEEP := ["Shoulder", "Arm", "Hand"]     # bones whose triangles are kept (Arm also matches ForeArm)
 const ARM_SCALE := 1.3
-const BULK := 0.022           # how far the arm skin is pushed out (mesh units ≈ m, before ARM_SCALE)
-const SHOULDERS := Vector3(0.03, -0.47, -0.2)   # shoulder midpoint in camera space (below the frame)
+const BULK := 0.016           # how far the arm skin is pushed out (mesh units ≈ m, before ARM_SCALE)
+const SHOULDERS := Vector3(0.03, -0.52, -0.2)   # shoulder midpoint in camera space (below the frame)
+const L_POLE := Vector3(0.7, -1.0, 0.3)        # left elbow direction (skeleton space, +X = body's left)
+const L_FWD := 0.16                              # left hand moved forward along the handguard (m)
+const L_PALM := Vector3(0.1, 1.0, 0.0)          # long guns: left palm normal in gun space (up, towards the gun)
+const L_FING := Vector3(0.6, 0.0, -0.8)         # long guns: left wrist -> knuckles in gun space (across, forward)
+const L_SHOULDER := Vector3(0.15, -0.25, 0.1)   # left shoulder offset (skeleton space: +X left, +Z forward)
+const L_OFF := Vector3.ZERO                       # long guns: extra left-hand offset in gun space
+const L_KNUCKLE := 0.05                         # palm centre distance from the wrist (m, before scale)
 
 var node: Node3D
 var skel: Skeleton3D
@@ -49,7 +56,7 @@ func build(camera: Node3D, body: String, tint: Color) -> void:
 	node.scale = Vector3.ONE * ARM_SCALE
 	var mid := (skel.get_bone_global_pose(skel.find_bone("mixamorig_LeftArm")).origin + skel.get_bone_global_pose(skel.find_bone("mixamorig_RightArm")).origin) * 0.5
 	var mid_cam: Vector3 = cam.to_local(skel.to_global(mid))
-	node.position += SHOULDERS - mid_cam
+	node.position += _vec_arg("--sh", SHOULDERS) - mid_cam
 	ik = IK.new()
 	ik.fp = self
 	skel.add_child(ik)
@@ -174,6 +181,21 @@ func _measure() -> void:
 	palm_l = lr.inverse() * Vector3.DOWN
 	fing_r = rr.inverse() * Vector3.LEFT     # the right arm points to -X in the T-pose
 	fing_l = lr.inverse() * Vector3.RIGHT
+	# measured from the finger bones when they exist (the rest pose isn't always an exact T-pose):
+	# wrist -> middle knuckle, and the palm normal from the index/pinky knuckles
+	var lm := skel.find_bone("mixamorig_LeftHandMiddle1")
+	var li := skel.find_bone("mixamorig_LeftHandIndex1")
+	var lp := skel.find_bone("mixamorig_LeftHandPinky1")
+	if lm >= 0 and li >= 0 and lp >= 0:
+		var h := skel.get_bone_global_rest(lh)
+		var f := skel.get_bone_global_rest(lm).origin - h.origin
+		var side := skel.get_bone_global_rest(li).origin - skel.get_bone_global_rest(lp).origin
+		var pn := f.cross(side)     # left hand: fingers x (pinky -> index) = palm side
+		if f.length() > 0.001 and pn.length() > 0.0001:
+			fing_l = (lr.inverse() * f).normalized()
+			palm_l = (lr.inverse() * pn).normalized()
+			if "--ikdbg" in OS.get_cmdline_user_args():
+				print("HANDL fing ", fing_l, " palm ", palm_l, " old fing ", lr.inverse() * Vector3.RIGHT, " old palm ", lr.inverse() * Vector3.DOWN)
 	var R := skel.get_bone_global_pose(rh)
 	var L := skel.get_bone_global_pose(lh)
 	var fwd := (L.origin - R.origin).normalized()
@@ -206,10 +228,32 @@ func update(g: Dictionary, show: bool) -> void:
 	var lb: Basis = gun_basis * rel_l
 	if left.has_meta("lgrip"):
 		var lg: Dictionary = left.get_meta("lgrip")
-		var lc: Vector3 = left.to_global(lg.c)
-		var l_wrist: Vector3 = lc - (lb * fing_l) * 0.05 - (lb * palm_l) * (float(lg.rad) + 0.022)
+		# long guns: hand further along the handguard (blends out while the left hand is away reloading)
+		var lfwd := 0.0
+		if g.get("kind", "") != "pistol" and g.has("left_home"):
+			lfwd = _f_arg("--lfwd", L_FWD) * (1.0 - clampf(left.position.distance_to(g.left_home) / 0.05, 0.0, 1.0))
+		var lc: Vector3 = left.to_global(lg.c) + gun_basis * (Vector3(0, 0, -lfwd) + (_vec_arg("--loff", L_OFF) if g.get("kind", "") != "pistol" else Vector3.ZERO))
+		if g.get("kind", "") != "pistol":
+			# support grip under the handguard: palm up and turned towards the gun, fingers across
+			# the underside so they curl up the far side; the wrist ends up below-left of the guard,
+			# so the forearm comes in diagonally from the lower left (the Mixamo aim clip's left hand
+			# is a fist beside the guard, which looked wrong on our guns)
+			var P: Vector3 = (gun_basis * _vec_arg("--lpalm", L_PALM)).normalized()
+			var F: Vector3 = gun_basis * _vec_arg("--lfing", L_FING)
+			F = (F - P * F.dot(P)).normalized()
+			lb = _frame(P, F, palm_l, fing_l)
+		var l_wrist: Vector3 = lc - (lb * fing_l) * _f_arg("--lknk", L_KNUCKLE) - (lb * palm_l) * (float(lg.rad) + 0.022)
 		ik.t_l = to_skel * Transform3D(lb, l_wrist)
 	ik.on = true
+
+
+## Hand basis that maps the bone's local palm normal / finger direction onto world P / F.
+static func _frame(P: Vector3, F: Vector3, pl: Vector3, fl: Vector3) -> Basis:
+	var a := fl.normalized()
+	var b := (pl - a * pl.dot(a)).normalized()
+	var local := Basis(a, b, a.cross(b))
+	var world := Basis(F, P, F.cross(P))
+	return world * local.transposed()
 
 
 ## Two-bone IK for both arms, applied after the (paused) aim clip.
@@ -219,6 +263,8 @@ class IK extends SkeletonModifier3D:
 	var t_r := Transform3D()
 	var t_l := Transform3D()
 	var ids := {}
+	var reach := {}     # hand bone -> target distance / arm length (> 1: can't reach)
+	const MAX_REACH := 0.94   # beyond this the shoulder slides towards the target
 
 	func _process_modification() -> void:
 		var sk := get_skeleton()
@@ -229,15 +275,32 @@ class IK extends SkeletonModifier3D:
 				ids[side] = [sk.find_bone("mixamorig_%sArm" % side), sk.find_bone("mixamorig_%sForeArm" % side), sk.find_bone("mixamorig_%sHand" % side)]
 		# skeleton space: body faces +Z, its right side is -X; elbows point down and out
 		_solve(sk, ids.Right, t_r, Vector3(-0.35, -1.0, -0.15))
-		_solve(sk, ids.Left, t_l, Vector3(0.35, -1.0, -0.15))
+		# left elbow out to the side: the forearm comes in diagonally from the lower left instead of
+		# standing up in the middle of the screen
+		_solve(sk, ids.Left, t_l, fp._vec_arg("--lpole", L_POLE), fp._vec_arg("--lsh", L_SHOULDER))
 
-	func _solve(sk: Skeleton3D, b: Array, t: Transform3D, pole_dir: Vector3) -> void:
+	func _solve(sk: Skeleton3D, b: Array, t: Transform3D, pole_dir: Vector3, sh_off := Vector3.ZERO) -> void:
+		if sh_off != Vector3.ZERO:
+			# move this shoulder joint on its own (the left one sits further out, so the forearm
+			# crosses the frame diagonally instead of pointing straight away from the camera)
+			var s0 := sk.get_bone_global_pose(b[0])
+			sk.set_bone_global_pose(b[0], Transform3D(s0.basis, s0.origin + sh_off))
 		var S := sk.get_bone_global_pose(b[0]).origin
 		var E := sk.get_bone_global_pose(b[1]).origin
 		var W := sk.get_bone_global_pose(b[2]).origin
 		var a := S.distance_to(E)
 		var c := E.distance_to(W)
 		var T := t.origin
+		# the shoulder is out of frame: when the hand target is too far (long guns, hand forward on
+		# the handguard during reloads) slide the shoulder towards it instead of leaving the hand
+		# floating short of the gun
+		var too_far := S.distance_to(T) - (a + c) * MAX_REACH
+		if too_far > 0.0:
+			var s1 := sk.get_bone_global_pose(b[0])
+			S += (T - S).normalized() * too_far
+			sk.set_bone_global_pose(b[0], Transform3D(s1.basis, S))
+			E = sk.get_bone_global_pose(b[1]).origin
+		reach[b[2]] = S.distance_to(T) / (a + c)
 		var d := clampf(S.distance_to(T), absf(a - c) + 0.01, (a + c) * 0.999)
 		var dir := (T - S).normalized()
 		var cos_a := clampf((a * a + d * d - c * c) / (2.0 * a * d), -1.0, 1.0)
@@ -268,3 +331,18 @@ static func _bulk_amount() -> float:
 		if a.begins_with("--bulk="):
 			return float(a.get_slice("=", 1))
 	return BULK
+
+
+static func _f_arg(k: String, d: float) -> float:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with(k + "="):
+			return float(a.get_slice("=", 1))
+	return d
+
+
+static func _vec_arg(k: String, d: Vector3) -> Vector3:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with(k + "="):
+			var p := a.get_slice("=", 1).split(",")
+			return Vector3(float(p[0]), float(p[1]), float(p[2]))
+	return d

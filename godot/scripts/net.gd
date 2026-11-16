@@ -4,6 +4,7 @@ extends Node
 ## go reliably. Remote players are "puppet" soldiers that forward damage to their owner.
 
 const SoldierScript := preload("res://scripts/soldier.gd")
+const GLASS := preload("res://scripts/glass.gd")
 const WB := preload("res://scripts/world.gd")
 const PORT := 7777
 const SEND_HZ := 20.0
@@ -39,6 +40,7 @@ var send_t := 0.0
 var alive_map := {}      # id -> alive (from the state stream)
 var respawn_t := 0.0
 var ended := false
+var nuke_by := 0     # player id that launched the nuke this match (0 = none)
 var status := ""
 # lobby: everyone gathers first, the host presses INICIAR PARTIDA (late joiners go straight in)
 var started := false
@@ -52,7 +54,8 @@ var pts_t := 0.0
 const VoiceScript := preload("res://scripts/voice.gd")
 var voice: Node
 const PLAYER_COLS := [Color(1.0, 1.0, 1.0), Color(0.35, 0.65, 1.0), Color(1.0, 0.82, 0.25), Color(0.4, 0.95, 0.45),
-	Color(1.0, 0.5, 0.3), Color(0.85, 0.5, 1.0), Color(0.4, 0.95, 0.95), Color(1.0, 0.55, 0.7)]
+	Color(1.0, 0.5, 0.3), Color(0.85, 0.5, 1.0), Color(0.4, 0.95, 0.95), Color(1.0, 0.55, 0.7),
+	Color(0.75, 1.0, 0.35), Color(0.6, 0.6, 1.0), Color(1.0, 0.68, 0.45), Color(0.6, 0.85, 0.75)]
 const VSEP := ""
 
 # ---- LAN discovery: the host broadcasts a small UDP beacon every second; the MULTIJUGADOR
@@ -60,7 +63,7 @@ const VSEP := ""
 signal lan_changed
 const LAN_PORT := 7778
 const LAN_TAG := "TAW1"
-const MAX_PLAYERS := 8
+const MAX_PLAYERS := 12      # people + bots in a room (co-op zombies too)
 var lan_games := {}      # host uid -> {name, map, n, ip, port, t}
 var beacon_t := 0.0
 var beacon_udp: PacketPeerUDP
@@ -256,7 +259,7 @@ func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa", onlin
 		online_mode = true
 	else:
 		var peer := ENetMultiplayerPeer.new()
-		var err := peer.create_server(port, 8)
+		var err := peer.create_server(port, MAX_PLAYERS - 1)
 		if err != OK:
 			return "No se pudo crear la partida en el puerto %d (¿ya está en uso?)" % port
 		multiplayer.multiplayer_peer = peer
@@ -271,6 +274,7 @@ func host(player_name: String, map_i: int, port := PORT, mode_id := "ffa", onlin
 	znext_id = 1
 	players = {}
 	players[1] = _new_player(my_name, int(game.settings.get("op", 0)))
+	add_bots(int(game.settings.get("mp_bots", 0)))
 	started = false
 	_enter_lobby()
 	add_chat("", "Sala creada. Espera a tus amigos y pulsa INICIAR PARTIDA.", true)
@@ -294,6 +298,8 @@ func join(player_name: String, ip: String, port := PORT) -> String:
 
 
 func leave() -> void:
+	_clear_bot_nodes()
+	bot_wait.clear()
 	for id in puppets.keys():
 		_remove_puppet(id)
 	puppets.clear()
@@ -354,6 +360,187 @@ func _on_peer_disconnected(id: int) -> void:
 	lobby_changed.emit()
 
 
+# ---------------------------------------------------------------- bots (host side)
+# Bots are entries in `players` (ids from BOT_ID0, "bot": true) driven by soldier.gd AI on the host.
+# Their state is streamed like a player's (zzzz_bots), so clients see them as ordinary puppets.
+const BOT_ID0 := 9001
+const BOT_NAMES := ["Halcón", "Lobo", "Cuervo", "Tejón", "Víbora", "Puma", "Zorro", "Lince", "Oso", "Águila", "Jabalí"]
+var bot_nodes := {}      # bot id -> soldier node (host only)
+var bot_wait := {}       # bot id -> seconds until it (re)spawns
+var bots_t := 0.0
+
+
+func is_bot(id: int) -> bool:
+	return bool(players.get(id, {}).get("bot", false))
+
+
+## Teams for bots and players: free-for-all / gun game -> everyone alone.
+func same_team(a: int, b: int) -> bool:
+	if a == b:
+		return true
+	if gmode == "zombies":
+		return true
+	return gmode == "tdm" and team_of(a) == team_of(b)
+
+
+## The node that stands for player / bot `id` on this machine.
+func node_of(id: int):
+	if id == my_id():
+		return game.player
+	if bot_nodes.has(id) and is_instance_valid(bot_nodes[id]):
+		return bot_nodes[id]
+	var pp = puppets.get(id)
+	return pp if pp != null and is_instance_valid(pp) else null
+
+
+## Everybody a bot may shoot at (host side).
+func bot_enemies(bot: int) -> Array:
+	var out := []
+	for id in players:
+		if id == bot or same_team(id, bot):
+			continue
+		var n = node_of(id)
+		if n != null:
+			out.append(n)
+	return out
+
+
+func add_bots(n: int) -> void:
+	if not is_host or gmode == "zombies":
+		return
+	var k := 0
+	for i in BOT_NAMES.size():
+		if k >= n or players.size() >= MAX_PLAYERS:
+			break
+		var id: int = BOT_ID0 + i
+		if players.has(id):
+			continue
+		var p := _new_player(BOT_NAMES[i] + " [BOT]", randi() % 4)
+		p["bot"] = true
+		players[id] = p
+		bot_wait[id] = 0.5 + k * 0.4
+		k += 1
+
+
+func remove_bot(id: int) -> void:
+	players.erase(id)
+	bot_wait.erase(id)
+	var b = bot_nodes.get(id)
+	if b != null and is_instance_valid(b):
+		game.enemies.erase(b)
+		b.queue_free()
+	bot_nodes.erase(id)
+	_remove_puppet(id)
+
+
+func _clear_bot_nodes() -> void:
+	for id in bot_nodes.keys():
+		var b = bot_nodes[id]
+		if b != null and is_instance_valid(b):
+			game.enemies.erase(b)
+			b.queue_free()
+	bot_nodes.clear()
+
+
+func _bot_spawn(id: int) -> void:
+	var pts: Array = game.spawns if not game.spawns.is_empty() else [WB.MAPS[game.map_idx].start]
+	if gmode == "tdm":
+		var side: float = -1.0 if team_of(id) == 0 else 1.0
+		var half: Array = pts.filter(func(p): return p.x * side > 0.0)
+		if half.size() >= 2:
+			pts = half
+	var best: Vector3 = pts[randi() % pts.size()]
+	var best_d := -1.0
+	var foes := bot_enemies(id)
+	var mates := []
+	for oid in bot_nodes:
+		var ob = bot_nodes[oid]
+		if is_instance_valid(ob) and not ob.dead:
+			mates.append(ob.global_position)
+	for i in 10:
+		var c: Vector3 = pts[randi() % pts.size()]
+		var crowded := false
+		for mp in mates:
+			if c.distance_to(mp) < 4.0:
+				crowded = true
+		if crowded:
+			continue
+		var dmin := 999.0
+		for f in foes:
+			if is_instance_valid(f):
+				dmin = minf(dmin, c.distance_to(f.global_position))
+		if dmin > best_d:
+			best_d = dmin
+			best = c
+	var s = SoldierScript.new()
+	s.game = game
+	s.bot_id = id
+	s.op = int(players[id].get("op", 0))
+	s.display_name = players[id].name
+	s.label_col = TEAM_COLS[team_of(id)] if gmode == "tdm" else Color(1.0, 0.85, 0.5)
+	if gmode == "tdm":
+		s.display_name += "  [%s]" % TEAM_NAMES[team_of(id)]
+	s.bot_wpn = gun_weapon(id) if gmode == "gun" else [0, 0, 3, 5, 1, 4][randi() % 6]
+	game.add_child(s)
+	s.global_position = best + Vector3(0, 0.3, 0)
+	s.facing = atan2(best.x, best.z)
+	game.enemies.append(s)
+	bot_nodes[id] = s
+
+
+## Host: respawn dead bots and stream their state to the clients.
+func _update_bots(delta: float) -> void:
+	for id in players.keys():
+		if not is_bot(id):
+			continue
+		var b = bot_nodes.get(id)
+		if b == null or not is_instance_valid(b):
+			bot_nodes.erase(id)
+			bot_wait[id] = float(bot_wait.get(id, 0.0)) - delta
+			if bot_wait[id] <= 0.0 and not ended:
+				_bot_spawn(id)
+		elif b.dead:
+			bot_wait[id] = float(bot_wait.get(id, RESPAWN_T)) - delta
+			if bot_wait[id] <= 0.0:
+				bot_nodes.erase(id)   # the corpse frees itself; a new body spawns next frame
+	bots_t -= delta
+	if bots_t > 0.0:
+		return
+	bots_t = 1.0 / SEND_HZ
+	var arr := []
+	for id in bot_nodes:
+		var b = bot_nodes[id]
+		if not is_instance_valid(b):
+			continue
+		var flags: int = (0 if b.dead else 1) | (2 if b.crouch_k > 0.5 else 0) | (4 if b.los and b.aim_k > 0.5 else 0)
+		arr.append([id, b.global_position, b.facing, b.aim_pitch_out, flags])
+	if not arr.is_empty():
+		rpc("zzzz_bots", arr)
+
+
+func bot_died(id: int, killer: int, head: bool, melee: bool) -> void:
+	if not active or not is_host:
+		return
+	bot_wait[id] = RESPAWN_T + 1.0
+	rpc("died", id, killer, head, melee)
+
+
+func bot_hit_peer(peer: int, bot: int, dmg: float, head: bool, from: Vector3) -> void:
+	if active and players.has(peer):
+		rpc_id(peer, "zzzz_bot_hit_you", bot, dmg, head, from)
+
+
+## Client grenade about to explode near the host's bots (they run from it).
+func nade_mark(pos: Vector3) -> void:
+	if active and not is_host:
+		rpc_id(1, "zzzz_nade_mark", pos)
+
+
+func bot_fx(bot: int, to: Vector3) -> void:
+	if active:
+		rpc("zzzz_bot_fx", bot, to)
+
+
 # ---------------------------------------------------------------- lobby RPCs
 @rpc("any_peer", "reliable")
 func hello(player_name: String, op_i: int) -> void:
@@ -373,6 +560,12 @@ func hello(player_name: String, op_i: int) -> void:
 				multiplayer.multiplayer_peer.disconnect_peer(id)
 		)
 		return
+	# room full of bots: a bot leaves to make space for a person
+	if players.size() >= MAX_PLAYERS:
+		for bid in players.keys():
+			if is_bot(bid):
+				remove_bot(bid)
+				break
 	if players.size() >= MAX_PLAYERS:
 		get_tree().create_timer(0.5).timeout.connect(func():
 			if multiplayer.multiplayer_peer:
@@ -445,6 +638,8 @@ func update(delta: float) -> void:
 			zsend_t = 0.1
 			_send_zombies()
 		_check_coop_wipe()
+	if is_host and gmode != "zombies":
+		_update_bots(delta)
 	# in co-op zombies a downed player waits for the next round (zmode calls coop_round_start)
 	if not pl.alive and not ended and gmode != "zombies":
 		respawn_t -= delta
@@ -454,7 +649,11 @@ func update(delta: float) -> void:
 
 @rpc("any_peer", "unreliable_ordered")
 func st(pos: Vector3, yaw: float, pitch: float, flags: int, wpn: int) -> void:
-	var id := multiplayer.get_remote_sender_id()
+	_apply_st(multiplayer.get_remote_sender_id(), pos, yaw, pitch, flags)
+
+
+## Remote player (or host bot) state -> its puppet.
+func _apply_st(id: int, pos: Vector3, yaw: float, pitch: float, flags: int) -> void:
 	if not players.has(id) or game.state == "menu":
 		return
 	var alive := (flags & 1) != 0
@@ -538,6 +737,8 @@ func boom(pos: Vector3, radius: float) -> void:
 func fx_boom(pos: Vector3, radius: float) -> void:
 	game.fx.explosion(pos, radius / 7.5)
 	game.sfx.play3d("boom", pos, 4.0)
+	if GLASS.current != null and is_instance_valid(GLASS.current):
+		GLASS.current.blast(pos, radius * 1.1, true)
 	if game.player and game.player.alive:
 		game.player.shake = maxf(game.player.shake, clampf(1.2 - game.player.global_position.distance_to(pos) / 30.0, 0.0, 1.0))
 
@@ -546,6 +747,10 @@ func fx_boom(pos: Vector3, radius: float) -> void:
 func send_hit(victim: int, dmg: float, head: bool) -> void:
 	if active and players.has(victim) and not is_ally(victim):
 		var melee: bool = bool(game.kill_ctx.get("melee", false)) if game.kill_ctx else false
+		if is_bot(victim):
+			# bots live on the host: it applies the damage and credits us
+			rpc_id(1, "zzzz_bot_dmg", victim, dmg, head, melee)
+			return
 		rpc_id(victim, "hit", dmg, head, game.player.global_position if game.player else Vector3.ZERO, melee)
 
 
@@ -639,6 +844,9 @@ func _gun_progress(killer: int, victim: int, melee: bool) -> void:
 		k.lvl = int(k.lvl) + 1
 		if killer == my_id() and int(k.lvl) < GUN_LADDER.size():
 			game.gun_game_loadout(true)
+		var bn = bot_nodes.get(killer)
+		if bn != null and is_instance_valid(bn):
+			bn.bot_wpn = gun_weapon(killer)
 	if melee and players.has(victim):
 		var v: Dictionary = players[victim]
 		if int(v.lvl) > 0:
@@ -655,8 +863,12 @@ func gun_weapon(id: int) -> int:
 @rpc("authority", "call_local", "reliable")
 func match_end(winner: int) -> void:
 	ended = true
+	if game.arg_value("--mptest") != "":
+		print("MATCH_END winner=%d nuke_by=%d me=%d" % [winner, nuke_by, my_id()])
+	game.nuke_t = -1.0
 	var title := ""
-	if winner >= 1000:
+	# teams are 1000 + team index (bot ids start at 9001, so a bot winning FFA is still a player)
+	if winner >= 1000 and winner < 1000 + TEAM_NAMES.size():
 		var t := winner - 1000
 		title = "GANA EL EQUIPO %s" % TEAM_NAMES[t]
 		if t == team_of(my_id()):
@@ -667,6 +879,8 @@ func match_end(winner: int) -> void:
 		var wn: String = players[winner].name if players.has(winner) else "?"
 		title = "%s GANA LA PARTIDA" % wn.to_upper()
 	var sub := "Nueva partida en 10 segundos"
+	if nuke_by != 0 and winner == nuke_by:
+		sub = "¡Nuclear lanzada! · " + sub
 	if winner < 0 and game.zm:
 		sub = "Habéis sobrevivido %d rondas · %s" % [maxi(game.zm.round_n - 1, 0), sub]
 	game.ui.notice(title, sub, 9.5)
@@ -687,7 +901,12 @@ func match_end(winner: int) -> void:
 func match_restart(p: Dictionary) -> void:
 	players = p
 	ended = false
+	nuke_by = 0
 	team_kills = [0, 0]
+	if is_host:
+		_clear_bot_nodes()
+		for bid in bot_wait:
+			bot_wait[bid] = 0.5
 	if gmode == "zombies":
 		# fresh map (closed doors) and round 1 for everyone
 		game.map_dirty = true
@@ -721,7 +940,8 @@ func zspawn(z) -> void:
 		return
 	z.nid = znext_id
 	znext_id += 1
-	rpc("zspawn_rpc", z.nid, z.global_position, z.facing, z.round_n, z.gait_kind, z.speed)
+	# bit 16 = boss zombie (decoded in zmode.client_spawn)
+	rpc("zspawn_rpc", z.nid, z.global_position, z.facing, z.round_n, z.gait_kind | (16 if z.get("boss") else 0), z.speed)
 
 
 @rpc("authority", "reliable")
@@ -1092,3 +1312,134 @@ func zzzz_voice(pkt: PackedByteArray) -> void:
 	var id := multiplayer.get_remote_sender_id()
 	if players.has(id):
 		voice.receive(id, pkt)
+
+# ---- bots (new RPCs stay at the end so older ids don't move)
+@rpc("authority", "unreliable_ordered")
+func zzzz_bots(arr: Array) -> void:
+	for a in arr:
+		_apply_st(int(a[0]), a[1], float(a[2]), float(a[3]), int(a[4]))
+
+
+## Client hit a bot's puppet: the host applies the damage (kill credit to the shooter).
+@rpc("any_peer", "reliable")
+func zzzz_bot_dmg(bot: int, dmg: float, head: bool, melee: bool) -> void:
+	if not is_host:
+		return
+	var b = bot_nodes.get(bot)
+	if b == null or not is_instance_valid(b) or b.dead:
+		return
+	b.hit_by = multiplayer.get_remote_sender_id()
+	game.kill_ctx = {"melee": melee}
+	b.take_damage(dmg, head)
+	game.kill_ctx = {}
+	b.hit_by = 0
+
+
+## A host bot hit this player.
+@rpc("authority", "reliable")
+func zzzz_bot_hit_you(bot: int, dmg: float, head: bool, from: Vector3) -> void:
+	var pl = game.player
+	if pl == null or not pl.alive or ended:
+		return
+	last_attacker = bot
+	last_head = head
+	last_melee = false
+	pl.take_damage(dmg, from)
+
+
+@rpc("authority", "unreliable")
+func zzzz_bot_fx(bot: int, to: Vector3) -> void:
+	var pp = puppets.get(bot)
+	if pp == null or not is_instance_valid(pp) or pp.dead:
+		return
+	# the shot comes from an aiming bot: face the target and raise the rifle at once
+	var d: Vector3 = to - pp.global_position
+	pp.net_yaw = atan2(-d.x, -d.z)
+	pp.facing = pp.net_yaw
+	pp.net_aim = true
+	pp.aim_k = maxf(pp.aim_k, 0.9)
+	var from: Vector3 = pp.tip.global_position
+	pp.flash_t = 0.05
+	pp.kick = 1.0
+	pp.last_shot = game.clock
+	game.fx.tracer(from, to)
+	game.fx.flash_light(from, 2.0, 5.0)
+	game.sfx.play3d("enemy", from, -2.0)
+
+@rpc("any_peer", "reliable")
+func zzzz_nade_mark(pos: Vector3) -> void:
+	if not is_host:
+		return
+	var m := Node3D.new()
+	game.add_child(m)
+	m.global_position = pos
+	m.add_to_group("live_nade")
+	m.set_meta("owner", multiplayer.get_remote_sender_id())
+	get_tree().create_timer(1.6, false).timeout.connect(m.queue_free)
+
+
+func nade_warn(pos: Vector3, vel: Vector3) -> void:
+	if active and not is_host:
+		rpc_id(1, "zzzz_nade", pos, vel)
+
+
+## Host: a client threw a grenade. A ghost follows a simple ballistic path (stops on the ground)
+## in the "live_nade" group, so bots react to it like to a local grenade.
+@rpc("any_peer", "reliable")
+func zzzz_nade(pos: Vector3, vel: Vector3) -> void:
+	if not is_host:
+		return
+	var ghost := Node3D.new()
+	game.add_child(ghost)
+	ghost.global_position = pos
+	ghost.add_to_group("live_nade")
+	ghost.set_meta("owner", multiplayer.get_remote_sender_id())
+	var landed := [false, pos]
+	var tw: Tween = game.create_tween()
+	tw.tween_method(func(t: float):
+		if not is_instance_valid(ghost):
+			return
+		if landed[0]:
+			ghost.global_position = landed[1]
+			return
+		var p: Vector3 = pos + vel * t + Vector3(0, -4.9, 0) * t * t
+		if p.y <= 0.1 and t > 0.1:
+			p.y = 0.1
+			landed[0] = true
+			landed[1] = p
+		ghost.global_position = p
+	, 0.0, 2.3, 2.3)
+	tw.tween_callback(ghost.queue_free)
+
+
+## Window glass broken here (scripts/glass.gd): the others break the same pane (ids follow the
+## deterministic map build).
+func glass_send(k: int) -> void:
+	if active:
+		rpc("zzzz_glass", k)
+
+
+@rpc("any_peer", "reliable")
+func zzzz_glass(k: int) -> void:
+	if GLASS.current != null and is_instance_valid(GLASS.current):
+		GLASS.current.shatter(k, Vector3.ZERO, true)
+
+
+# ---- nuke (30-kill streak): countdown on every machine, then the host ends the match
+func nuke_send() -> void:
+	if active and not ended:
+		rpc("zzzz_nuke")
+
+
+func nuke_end() -> void:
+	if active and is_host and not ended and nuke_by != 0:
+		rpc("match_end", nuke_by)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func zzzz_nuke() -> void:
+	var by := multiplayer.get_remote_sender_id()
+	if ended or nuke_by != 0 or not players.has(by):
+		return
+	nuke_by = by
+	game.nuke_countdown(str(players[by].name), by == my_id())

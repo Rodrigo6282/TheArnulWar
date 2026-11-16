@@ -151,6 +151,129 @@ public static class Synth {
         return o;
     }
 
+    // ------------------------------------------------------------------ footsteps by surface
+    // kind: conc (asphalt/concrete), dirt, wood, metal, snow, sand, grass.
+    // heel contact + toe contact, each = low thud + (hard surfaces) a bright click, plus surface
+    // texture: grains (gravel, snow crunch, sand hiss), resonant modes (hollow boards, ringing sheet
+    // metal) or a rustle (grass).
+    static double[] StepS(string kind, int seed, double heavy) {
+        R = new Random(seed);
+        double thudF = 85, thudD = 0.016, thudA = 1.0, click = 0, clickF = 3000;
+        double gDens = 0, gF1 = 2000, gF2 = 4500, gDec = 0.05, gA = 0.5, rustle = 0, scuff = 0.15, len = 0.32;
+        double[][] modes = new double[0][];
+        if (kind == "conc") { thudF = 105; thudD = 0.011; thudA = 0.8; click = 0.9; clickF = 3400; gDens = 0.004; gF1 = 3200; gF2 = 6500; gDec = 0.02; gA = 0.35; scuff = 0.3; }
+        else if (kind == "wood") { thudF = 95; thudD = 0.018; thudA = 0.7; click = 0.35; clickF = 2200; scuff = 0.12;
+            modes = new double[][] { new double[] { Rf(165, 190), 0.07, 1.0 }, new double[] { Rf(290, 320), 0.05, 0.6 }, new double[] { Rf(480, 540), 0.035, 0.35 }, new double[] { Rf(820, 900), 0.02, 0.2 } }; len = 0.36; }
+        else if (kind == "metal") { thudF = 120; thudD = 0.01; thudA = 0.6; click = 0.8; clickF = 4200; scuff = 0.1;
+            modes = new double[][] { new double[] { Rf(380, 430), 0.22, 0.55 }, new double[] { Rf(1050, 1150), 0.16, 0.4 }, new double[] { Rf(2150, 2350), 0.11, 0.3 }, new double[] { Rf(3400, 3600), 0.07, 0.18 } }; len = 0.6; }
+        else if (kind == "snow") { thudF = 60; thudD = 0.03; thudA = 0.7; gDens = 0.09; gF1 = Rf(1000, 1400); gF2 = Rf(2600, 3200); gDec = 0.11; gA = 0.8; scuff = 0; len = 0.36; }
+        else if (kind == "sand") { thudF = 65; thudD = 0.025; thudA = 0.6; gDens = 0.12; gF1 = 4200; gF2 = 7500; gDec = 0.07; gA = 0.35; scuff = 0.45; len = 0.34; }
+        else if (kind == "grass") { thudF = 70; thudD = 0.022; thudA = 0.75; gDens = 0.006; gF1 = 1800; gF2 = 3600; gDec = 0.04; gA = 0.4; rustle = 0.5; scuff = 0.05; }
+        else { return Step(seed, heavy); }
+        int n = (int)(SR * (len + heavy * 0.12));
+        var o = new double[n];
+        var lpT = Biquad.LowPass(240 + heavy * 50, 0.7, SR);
+        var hpC = Biquad.HighPass(clickF, 0.8, SR);
+        var bp1 = Biquad.BandPass(gF1, 1.0, SR);
+        var bp2 = Biquad.BandPass(gF2, 1.3, SR);
+        var hpR = Biquad.HighPass(2600, 0.7, SR);
+        var bpS = Biquad.BandPass(Rf(1500, 2500), 0.8, SR);
+        var hp = Biquad.HighPass(45, 0.7, SR);
+        double toe = Rf(0.05, 0.08) + heavy * 0.02;
+        double f0 = thudF * Rf(0.9, 1.1) - heavy * 12;
+        double ph = 0, grains = 0;
+        var mph = new double[modes.Length];
+        for (int i = 0; i < n; i++) {
+            double t = (double)i / SR;
+            double tt = t - toe;
+            // contacts: heel (full) and toe (lighter)
+            double eH = Math.Exp(-t / (thudD + heavy * 0.02)) * (1 - Math.Exp(-t / 0.0012));
+            double eT = tt > 0 ? Math.Exp(-tt / (thudD * 0.8)) * (1 - Math.Exp(-tt / 0.0015)) * 0.55 : 0;
+            ph += 2 * Math.PI * f0 * (1 + 0.5 * Math.Exp(-t / 0.008)) / SR;
+            double thud = (Math.Sin(ph) * 0.8 + lpT.P(Rnd()) * 2.0) * (eH + eT) * thudA * (1 + heavy * 0.7);
+            // click: a few ms of bright noise at each contact (hard sole on a hard floor)
+            double cE = Math.Exp(-t / 0.0025) + (tt > 0 ? Math.Exp(-tt / 0.002) * 0.6 : 0);
+            double cl = hpC.P(Rnd()) * cE * click;
+            // resonant modes, excited by both contacts
+            double res = 0;
+            for (int k = 0; k < modes.Length; k++) {
+                mph[k] += 2 * Math.PI * modes[k][0] / SR;
+                double ek = Math.Exp(-t / modes[k][1]) + (tt > 0 ? 0.5 * Math.Exp(-tt / modes[k][1]) : 0);
+                res += Math.Sin(mph[k]) * ek * modes[k][2] * (1 - Math.Exp(-t / 0.002));
+            }
+            // grains: crunch / grit / hiss, dense right after the contacts
+            double dens = gDens * (Math.Exp(-t / gDec) + (tt > 0 ? 0.8 * Math.Exp(-tt / gDec) : 0)) + gDens * 0.03;
+            if (R.NextDouble() < dens) grains += Rf(0.3, 1.0) * (R.NextDouble() < 0.5 ? -1 : 1);
+            grains *= 0.82;
+            double gr = (bp1.P(grains + Rnd() * 0.04) * 1.4 + bp2.P(grains) * 0.7) * gA;
+            // grass rustle: soft high noise swell over the roll
+            double ru = rustle > 0 ? hpR.P(Rnd()) * rustle * 0.25 * Math.Exp(-Math.Pow((t - 0.07) / 0.06, 2)) : 0;
+            // scuff at the end of the roll
+            double ts = t - toe - 0.015;
+            double sc = ts > 0 ? bpS.P(Rnd()) * scuff * 0.3 * Math.Exp(-ts / 0.05) * (1 - Math.Exp(-ts / 0.01)) : 0;
+            o[i] = hp.P(thud + cl * 0.5 + res * 0.35 + gr + ru + sc);
+        }
+        return o;
+    }
+
+    // ------------------------------------------------------------------ zombie extras
+    // raspy breathing: noise through a slowly moving vowel, inhale + exhale with a wet rattle
+    static double[] Breath(int seed, double dur) {
+        R = new Random(seed);
+        int n = (int)(SR * dur);
+        var o = new double[n];
+        var f1 = Biquad.BandPass(600, 3, SR);
+        var f2 = Biquad.BandPass(1300, 4, SR);
+        var f3 = Biquad.BandPass(2600, 5, SR);
+        var hp = Biquad.HighPass(120, 0.7, SR);
+        double rat = 0, ratT = 0;
+        double split = Rf(0.38, 0.5);
+        for (int i = 0; i < n; i++) {
+            double t = (double)i / n;
+            double ts = (double)i / SR;
+            // inhale (quieter, higher), short gap, exhale (louder, lower)
+            double env, sh;
+            if (t < split) { double u = t / split; env = Math.Sin(Math.PI * u) * 0.55; sh = 1.25; }
+            else if (t < split + 0.06) { env = 0; sh = 1; }
+            else { double u = (t - split - 0.06) / (1 - split - 0.06); env = Math.Pow(Math.Sin(Math.PI * Math.Min(1, u)), 0.7); sh = 0.85; }
+            if (i % 64 == 0) { f1.SetBP(600 * sh, 3, SR); f2.SetBP(1300 * sh, 4, SR); f3.SetBP(2600 * sh, 5, SR); }
+            // rattle: phlegm flutter (random clicks ~30-60 Hz)
+            ratT -= 1.0 / SR;
+            if (ratT <= 0) { ratT = Rf(0.012, 0.035); rat = Rf(0.4, 1.0); }
+            rat *= 0.995;
+            double x = Rnd();
+            double y = f1.P(x) * 1.0 + f2.P(x) * 0.7 + f3.P(x) * 0.35;
+            y *= env * (0.55 + 0.45 * rat);
+            o[i] = hp.P(Math.Tanh(y * 3) );
+        }
+        return o;
+    }
+
+    // foot dragged over the ground: long filtered scrape with a stuttering grip
+    static double[] Drag(int seed) {
+        R = new Random(seed);
+        int n = (int)(SR * Rf(0.45, 0.65));
+        var o = new double[n];
+        var bp = Biquad.BandPass(Rf(900, 1400), 0.9, SR);
+        var bp2 = Biquad.BandPass(Rf(2800, 3600), 1.4, SR);
+        var lp = Biquad.LowPass(200, 0.7, SR);
+        double st = 1, stT = 0, ph = 0;
+        for (int i = 0; i < n; i++) {
+            double t = (double)i / n;
+            double ts = (double)i / SR;
+            stT -= 1.0 / SR;
+            if (stT <= 0) { stT = Rf(0.01, 0.04); st = Rf(0.3, 1.0); }
+            double env = Math.Min(1, ts / 0.04) * Math.Pow(1 - t, 0.8);
+            double x = Rnd();
+            double y = (bp.P(x) * 1.2 + bp2.P(x) * 0.5) * st * env;
+            // the shoe touching down at the start
+            ph += 2 * Math.PI * 80 / SR;
+            y += (Math.Sin(ph) * 0.6 + lp.P(Rnd()) * 1.5) * Math.Exp(-ts / 0.02) * (1 - Math.Exp(-ts / 0.002));
+            o[i] = y;
+        }
+        return o;
+    }
+
     // vowel formants F1..F4 (scaled down a bit for a bigger, deeper throat)
     static readonly double[] UH = { 520, 1000, 2300, 3300 };
     static readonly double[] AH = { 680, 1100, 2350, 3300 };
@@ -175,5 +298,24 @@ public static class Synth {
         // deaths: falling pitch, choking, long fade
         Save(Path.Combine(dir, "zdie1.wav"), Voice(31, 1.4, new double[] { 130, 115, 90, 65, 48 }, new double[][] { AH, AH, UH, OO }, 0.8, 0.6, 4.0, 0.7, 0.02), 0.85);
         Save(Path.Combine(dir, "zdie2.wav"), Voice(32, 1.1, new double[] { 150, 120, 80, 55 }, new double[][] { AE, AH, RR, OO }, 0.9, 0.7, 5.0, 0.8, 0.02), 0.85);
+        // more voices: wetter, more broken groans, extra snarls and a choking death
+        Save(Path.Combine(dir, "zgroan6.wav"), Voice(16, 2.6, new double[] { 66, 74, 92, 80, 70, 64, 58 }, new double[][] { OH, UH, AH, AH, UH, OO }, 0.85, 0.45, 3.8, 0.75, 0.4), 0.8);
+        Save(Path.Combine(dir, "zgroan7.wav"), Voice(17, 1.4, new double[] { 88, 120, 104, 84 }, new double[][] { RR, AE, UH, OO }, 0.7, 0.55, 4.5, 0.55, 0.12), 0.8);
+        Save(Path.Combine(dir, "zgroan8.wav"), Voice(18, 2.0, new double[] { 58, 62, 60, 66, 56, 50 }, new double[][] { OO, UH, OO, RR, OO }, 0.95, 0.6, 5.0, 0.85, 0.5), 0.8);
+        Save(Path.Combine(dir, "zattack3.wav"), Voice(23, 0.75, new double[] { 120, 200, 230, 170, 110 }, new double[][] { UH, AE, AH, RR }, 0.65, 0.85, 7.5, 0.35, 0.02), 0.9);
+        Save(Path.Combine(dir, "zattack4.wav"), Voice(24, 0.5, new double[] { 180, 240, 160 }, new double[][] { AE, AH, UH }, 0.5, 1.0, 8.0, 0.2, 0.015), 0.9);
+        Save(Path.Combine(dir, "zdie3.wav"), Voice(33, 1.8, new double[] { 110, 125, 95, 70, 52, 44 }, new double[][] { AH, AE, UH, RR, OO }, 0.95, 0.75, 5.5, 0.9, 0.03), 0.85);
+        // sprinters: a torn, high shriek when they start running
+        Save(Path.Combine(dir, "zscream1.wav"), Voice(41, 1.1, new double[] { 260, 380, 420, 360, 240 }, new double[][] { AE, AE, AH, AH }, 0.4, 1.1, 9.0, 0.2, 0.04), 0.95);
+        Save(Path.Combine(dir, "zscream2.wav"), Voice(42, 0.9, new double[] { 300, 440, 390, 280 }, new double[][] { AH, AE, AE }, 0.5, 1.2, 10.0, 0.25, 0.03), 0.95);
+        // close-up breathing and dragged feet
+        for (int i = 0; i < 3; i++) Save(Path.Combine(dir, "zbreath" + (i + 1) + ".wav"), Breath(51 + i, Rf(1.3, 1.9)), 0.7);
+        for (int i = 0; i < 3; i++) Save(Path.Combine(dir, "zdrag" + (i + 1) + ".wav"), Drag(61 + i), 0.6);
+        // footsteps for every surface: 4 variants + a landing each (st_<kind>N, ld_<kind>)
+        string[] kinds = { "conc", "dirt", "wood", "metal", "snow", "sand", "grass" };
+        for (int k = 0; k < kinds.Length; k++) {
+            for (int i = 0; i < 4; i++) Save(Path.Combine(dir, "st_" + kinds[k] + (i + 1) + ".wav"), StepS(kinds[k], 200 + k * 31 + i * 7, 0), 0.55);
+            Save(Path.Combine(dir, "ld_" + kinds[k] + ".wav"), StepS(kinds[k], 900 + k, 1), 0.7);
+        }
     }
 }

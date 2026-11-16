@@ -188,6 +188,8 @@ func receive(id: int, pkt: PackedByteArray) -> void:
 		gen.buffer_length = 0.5
 		pl.stream = gen
 		pl.volume_db = 2.0
+		if AudioServer.get_bus_index("Voz") >= 0:
+			pl.bus = "Voz"
 		add_child(pl)
 		pl.play()
 		o = {"pl": pl, "pb": pl.get_stream_playback()}

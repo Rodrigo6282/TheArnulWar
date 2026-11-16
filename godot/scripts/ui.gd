@@ -91,6 +91,29 @@ var coop_box: VBoxContainer
 var coop_t := 0.0
 var lob_t := 0.0
 var mini_tex: ImageTexture
+# OPCIONES / ARMERO screens
+var opt_p: Control
+var opt_from_pause := false
+var opt_ctrls := {}
+var opt_gpu: Label
+var arm_p: Control
+var arm_vp: SubViewport
+var arm_gun: Node3D
+var arm_gd: Dictionary = {}
+var arm_wi := 0
+var arm_btns: Array = []
+var arm_credits: Label
+var arm_msg: Label
+var arm_stats: VBoxContainer
+var arm_slots: VBoxContainer
+var arm_base: Array = []
+const ARM := preload("res://scripts/armory.gd")
+const STK := preload("res://scripts/streaks.gd")
+var arm_streaks: HBoxContainer
+var over_title: Label
+var nuke_rect: ColorRect
+var nuke_a := 0.0
+const WMS := preload("res://scripts/weapon_models.gd")
 const MINI_SIZE := 210.0
 const MINI_RANGE := 34.0          # metres from the centre to the edge
 
@@ -174,6 +197,9 @@ func setup(g) -> void:
 	_build_ops()
 	_build_lobby()
 	_build_chat()
+	_build_options()
+	_build_armory()
+	sync_settings()
 
 
 func _make_theme() -> Theme:
@@ -264,29 +290,48 @@ func _build_menu() -> void:
 	var sp := Control.new()
 	sp.custom_minimum_size = Vector2(0, 10)
 	vb.add_child(sp)
-	var maps := HBoxContainer.new()
-	maps.alignment = BoxContainer.ALIGNMENT_CENTER
-	maps.add_theme_constant_override("separation", 10)
-	vb.add_child(maps)
+	# map choice: one row per mode (fixed-size buttons, clipped text) so they never overlap
+	var rows := {}
+	for mk in ["ops", "zombies"]:
+		var r := HBoxContainer.new()
+		r.alignment = BoxContainer.ALIGNMENT_CENTER
+		r.add_theme_constant_override("separation", 12)
+		var hl := _label("OPERACIÓN" if mk == "ops" else "ZOMBIS", 15, GOLD, 3)
+		hl.custom_minimum_size = Vector2(110, 0)
+		hl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		hl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		r.add_child(hl)
+		vb.add_child(r)
+		rows[mk] = r
+	map_btns.resize(WB.MAPS.size())
 	for i in WB.MAPS.size():
 		var md: Dictionary = WB.MAPS[i]
-		var b := _button(maps, "%s\n%s" % [md.name, "ZOMBIS" if md.mode == "zombies" else "OPERACIÓN"], func():
+		var b := _button(rows["zombies" if md.mode == "zombies" else "ops"], md.name, func():
 			game.load_map(i)
 			game.save_settings()
 			sync_settings()
 		, true)
-		b.custom_minimum_size = Vector2(164, 60)
-		b.add_theme_font_size_override("font_size", 14)
-		map_btns.append(b)
+		b.custom_minimum_size = Vector2(200, 40)
+		b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		b.clip_text = true
+		b.add_theme_font_size_override("font_size", 15)
+		map_btns[i] = b
 	map_desc = _label("", 16, Color(0.9, 0.92, 0.9), 3)
 	map_desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(map_desc)
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
 	vb.add_child(row)
 	_button(row, "DESPLEGAR", func(): game.start_game())
 	_button(row, "MULTIJUGADOR", func(): show_mp(), true)
 	op_btn = _button(row, "OPERADOR", func(): show_ops(), true)
+	var row_b := HBoxContainer.new()
+	row_b.alignment = BoxContainer.ALIGNMENT_CENTER
+	row_b.add_theme_constant_override("separation", 12)
+	vb.add_child(row_b)
+	_button(row_b, "ARMERO", func(): show_armory(), true)
+	_button(row_b, "OPCIONES", func(): show_options(false), true)
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 18)
@@ -294,40 +339,6 @@ func _build_menu() -> void:
 	var gc := CenterContainer.new()
 	gc.add_child(grid)
 	vb.add_child(gc)
-	grid.add_child(_label("Calidad gráfica", 17))
-	q_opt = OptionButton.new()
-	for n in ["Baja", "Media", "Alta (iluminación global)"]:
-		q_opt.add_item(n)
-	q_opt.item_selected.connect(func(i):
-		game.settings.quality = i
-		game.apply_quality()
-		game.save_settings()
-	)
-	grid.add_child(q_opt)
-	grid.add_child(_label("Pantalla completa", 17))
-	fs_chk = CheckButton.new()
-	fs_chk.toggled.connect(func(on):
-		game.settings.fullscreen = on
-		game.apply_fullscreen()
-		game.save_settings()
-	)
-	grid.add_child(fs_chk)
-	grid.add_child(_label("Sensibilidad", 17))
-	var sh := HBoxContainer.new()
-	sens_sl = HSlider.new()
-	sens_sl.min_value = 0.2
-	sens_sl.max_value = 3.0
-	sens_sl.step = 0.05
-	sens_sl.custom_minimum_size = Vector2(200, 0)
-	sens_l = _label("1.00", 16)
-	sens_sl.value_changed.connect(func(v):
-		game.settings.sens = v
-		sens_l.text = "%.2f" % v
-		game.save_settings()
-	)
-	sh.add_child(sens_sl)
-	sh.add_child(sens_l)
-	grid.add_child(sh)
 	grid.add_child(_label("Dificultad", 17))
 	d_opt = OptionButton.new()
 	for n in ["Recluta", "Regular", "Veterano"]:
@@ -368,13 +379,10 @@ func _build_menu() -> void:
 
 
 func sync_settings() -> void:
-	if q_opt == null:
+	if d_opt == null:
 		return
-	q_opt.select(game.settings.quality)
 	d_opt.select(game.settings.diff)
-	fs_chk.set_pressed_no_signal(game.settings.fullscreen)
-	sens_sl.set_value_no_signal(game.settings.sens)
-	sens_l.text = "%.2f" % game.settings.sens
+	_sync_options()
 	for vo in [v_opt, lob_voice]:
 		if vo:
 			vo.select(int(game.settings.get("voice", 0)))
@@ -391,7 +399,7 @@ func sync_settings() -> void:
 	if map_desc:
 		map_desc.text = WB.MAPS[game.map_idx].desc
 	if profile_l:
-		profile_l.text = "Récord Operación: %d puntos   ·   Mejor ronda Zombis: %d   ·   Medallas ganadas: %d" % [game.best, game.best_round, game.medal_count()]
+		profile_l.text = "Récord Operación: %d puntos   ·   Mejor ronda Zombis: %d   ·   Medallas ganadas: %d   ·   Créditos del armero: %d" % [game.best, game.best_round, game.medal_count(), int(game.settings.get("credits", 0))]
 
 
 func _build_pause() -> void:
@@ -417,12 +425,7 @@ func _build_pause() -> void:
 		if not game.net.active:
 			game.start_game()
 	, true)
-	_button(vb, "Pantalla completa", func():
-		game.settings.fullscreen = not game.settings.fullscreen
-		game.apply_fullscreen()
-		game.save_settings()
-		sync_settings()
-	, true)
+	_button(vb, "Opciones", func(): show_options(true), true)
 	_button(vb, "Menú principal", func(): game.to_menu(), true)
 	_button(vb, "Salir del juego", func(): game.get_tree().quit(), true)
 
@@ -433,6 +436,7 @@ func _build_over() -> void:
 	var t := _label("CAÍSTE EN COMBATE", 52, RED, 8)
 	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(t)
+	over_title = t
 	over_stats = _label("", 22, GOLD, 4)
 	over_stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(over_stats)
@@ -692,6 +696,28 @@ func _build_mp() -> void:
 	mp_mode.item_selected.connect(func(_i): fill_maps.call())
 	mp_mode.selected = maxi(0, game.net.MODE_ORDER.find(game.settings.get("mp_mode", "ffa")))
 	fill_maps.call()
+	# bots fill the match (host only, not in co-op zombies)
+	grid.add_child(_label("Bots (host)", 17))
+	var bh := HBoxContainer.new()
+	var bo := OptionButton.new()
+	for k in game.net.MAX_PLAYERS:
+		bo.add_item("Sin bots" if k == 0 else "%d bots" % k)
+	bo.select(clampi(int(game.settings.get("mp_bots", 3)), 0, game.net.MAX_PLAYERS - 1))
+	bo.item_selected.connect(func(i):
+		game.settings["mp_bots"] = i
+		game.save_settings()
+	)
+	bh.add_child(bo)
+	var bs := OptionButton.new()
+	for nm in ["Bots fáciles", "Bots normales", "Bots difíciles"]:
+		bs.add_item(nm)
+	bs.select(clampi(int(game.settings.get("bot_skill", 1)), 0, 2))
+	bs.item_selected.connect(func(i):
+		game.settings["bot_skill"] = i
+		game.save_settings()
+	)
+	bh.add_child(bs)
+	grid.add_child(bh)
 	# ---- two clear sections side by side: local network | online (internet)
 	var cols := HBoxContainer.new()
 	cols.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -1059,6 +1085,11 @@ func show_menu() -> void:
 		op_model = null
 	if op_btn:
 		op_btn.text = "OPERADOR: %s" % OPS.get_op(int(game.settings.get("op", 0))).name.to_upper()
+	if opt_p:
+		opt_p.visible = false
+	if arm_p:
+		arm_p.visible = false
+		_clear_arm_preview()
 	menu.visible = true
 	pause_p.visible = false
 	over_p.visible = false
@@ -1074,6 +1105,8 @@ func show_menu() -> void:
 func show_hud() -> void:
 	if mp_p:
 		mp_p.visible = false
+	if opt_p:
+		opt_p.visible = false
 	menu.visible = false
 	pause_p.visible = false
 	over_p.visible = false
@@ -1106,6 +1139,14 @@ func show_gameover(st: Dictionary) -> void:
 		over_stats.text = "Ronda %d   ·   Bajas %d   ·   A la cabeza %d   ·   Puntos %d\nMejor ronda: %d\n\nMEDALLAS: %s" % [st.round, st.kills, st.heads, st.score, st.best_round, mt]
 	else:
 		over_stats.text = "Puntos %d   ·   Oleada %d   ·   Bajas %d   ·   A la cabeza %d   ·   Precisión %d%%\nRécord: %d\n\nMEDALLAS: %s" % [st.score, st.wave, st.kills, st.heads, st.acc, st.best, mt]
+	if st.get("victory", false):
+		over_title.text = "¡VICTORIA! NUCLEAR LANZADA"
+		over_title.add_theme_color_override("font_color", GOLD)
+	else:
+		over_title.text = "CAÍSTE EN COMBATE"
+		over_title.add_theme_color_override("font_color", RED)
+	if int(st.get("credits", 0)) > 0:
+		over_stats.text += "\n\n+%d créditos para el ARMERO (total %d)" % [int(st.credits), int(game.settings.get("credits", 0))]
 	over_p.visible = true
 	hud.visible = false
 
@@ -1281,7 +1322,27 @@ func damage_from(rel: float) -> void:
 	tw.tween_callback(piv.queue_free)
 
 
+## Nuke detonation: the whole screen goes white and fades out.
+func nuke_flash() -> void:
+	if nuke_rect == null:
+		nuke_rect = ColorRect.new()
+		nuke_rect.color = Color(1.0, 0.97, 0.9)
+		nuke_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+		nuke_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(nuke_rect)
+	nuke_a = 1.0
+	nuke_rect.modulate.a = 1.0
+	nuke_rect.visible = true
+
+
 func tick(delta: float) -> void:
+	if nuke_rect and nuke_rect.visible:
+		nuke_a -= delta * 0.35
+		nuke_rect.modulate.a = clampf(nuke_a * 1.4, 0.0, 1.0)
+		if nuke_a <= 0.0:
+			nuke_rect.visible = false
+	if arm_p and arm_p.visible and arm_gun and is_instance_valid(arm_gun):
+		arm_gun.rotation.y += delta * 0.45
 	if notice_t > 0.0:
 		notice_t -= delta
 		if notice_t <= 0.4:
@@ -1362,6 +1423,7 @@ func tick(delta: float) -> void:
 		stats_l.text = "PUNTOS %d\nBAJAS %d\nRACHA %d" % [game.score, game.kills, game.streak]
 		round_l.text = ""
 	info_l.text = game.hud_info()
+	fps_l.visible = bool(game.settings.get("show_fps", false))
 	fps_l.text = "%d FPS" % Engine.get_frames_per_second()
 	board_p.visible = game.net.active and Input.is_physical_key_pressed(KEY_TAB)
 	if board_p.visible:
@@ -1400,7 +1462,7 @@ func tick(delta: float) -> void:
 	else:
 		prompt_l.text = ""
 	var gap: float = 6.0 + p.current_spread() * get_viewport().get_visible_rect().size.y * 0.9 + p.kick * 6.0
-	var show: bool = p.aim_k < 0.5 and p.sprint_k < 0.5 and not p.scoped
+	var show: bool = (p.aim_k < 0.5 or p.tps_k > 0.5) and p.sprint_k < 0.5 and not p.scoped
 	for i in 4:
 		ch[i].visible = show
 	ch[0].position = Vector2(-1, -gap - 10)
@@ -1821,3 +1883,511 @@ func _tick_mp(delta: float) -> void:
 		pl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		r.add_child(pl)
 		coop_box.add_child(pc)
+
+
+# ---------------------------------------------------------------- OPCIONES
+func _opt_slider(grid: GridContainer, text: String, key: String, mn: float, mx: float, step: float, fmt: String, cb: Callable) -> void:
+	grid.add_child(_label(text, 17))
+	var h := HBoxContainer.new()
+	var s := HSlider.new()
+	s.min_value = mn
+	s.max_value = mx
+	s.step = step
+	s.custom_minimum_size = Vector2(260, 0)
+	s.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var l := _label("", 16)
+	l.custom_minimum_size = Vector2(70, 0)
+	s.value_changed.connect(func(v):
+		game.settings[key] = v
+		l.text = fmt % (v * 100.0 if fmt.contains("%%") else v)
+		cb.call()
+		game.save_settings()
+	)
+	h.add_child(s)
+	h.add_child(l)
+	grid.add_child(h)
+	opt_ctrls[key] = [s, l, fmt]
+
+
+func _opt_check(grid: GridContainer, text: String, key: String, cb: Callable) -> void:
+	grid.add_child(_label(text, 17))
+	var c := CheckButton.new()
+	for st in ["normal", "hover", "pressed", "hover_pressed"]:
+		c.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	c.toggled.connect(func(on):
+		game.settings[key] = on
+		cb.call()
+		game.save_settings()
+	)
+	grid.add_child(c)
+	opt_ctrls[key] = [c]
+
+
+func _opt_choice(grid: GridContainer, text: String, key: String, items: Array, values: Array, cb: Callable) -> void:
+	grid.add_child(_label(text, 17))
+	var o := OptionButton.new()
+	for it in items:
+		o.add_item(it)
+	o.item_selected.connect(func(i):
+		game.settings[key] = values[i]
+		cb.call()
+		game.save_settings()
+	)
+	grid.add_child(o)
+	opt_ctrls[key] = [o, values]
+
+
+func _opt_tab(tabs: TabContainer, title: String) -> GridContainer:
+	var m := MarginContainer.new()
+	m.name = title
+	for side in ["left", "right", "top", "bottom"]:
+		m.add_theme_constant_override("margin_" + side, 18)
+	tabs.add_child(m)
+	var g := GridContainer.new()
+	g.columns = 2
+	g.add_theme_constant_override("h_separation", 24)
+	g.add_theme_constant_override("v_separation", 12)
+	m.add_child(g)
+	return g
+
+
+func _build_options() -> void:
+	opt_p = _overlay()
+	var vb: VBoxContainer = opt_p.get_meta("box")
+	var t := _label("OPCIONES", 52, GOLD, 8)
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(t)
+	var tabs := TabContainer.new()
+	tabs.custom_minimum_size = Vector2(760, 420)
+	vb.add_child(tabs)
+	var q := func(): game.apply_quality()
+	var d := func(): game.apply_display()
+	# Imagen
+	var gi := _opt_tab(tabs, "Imagen")
+	_opt_slider(gi, "Brillo", "bright", 0.5, 1.6, 0.05, "%d %%", d)
+	_opt_slider(gi, "Campo de visión", "fov", 60.0, 100.0, 1.0, "%d°", d)
+	_opt_check(gi, "Pantalla completa", "fullscreen", func(): game.apply_fullscreen())
+	_opt_check(gi, "Mostrar FPS", "show_fps", func(): pass)
+	# Controles
+	var gc := _opt_tab(tabs, "Controles")
+	_opt_slider(gc, "Sensibilidad del ratón", "sens", 0.2, 3.0, 0.05, "%.2f", func(): pass)
+	_opt_slider(gc, "Sensibilidad al apuntar", "ads_sens", 0.3, 1.5, 0.05, "%.2f", func(): pass)
+	_opt_check(gc, "Invertir eje vertical", "invert_y", func(): pass)
+	_opt_check(gc, "Cámara en tercera persona (tecla H)", "tps", func():
+		if game.player and is_instance_valid(game.player):
+			game.player.set_tps(bool(game.settings.tps), true)
+	)
+	# Sonido
+	var gs := _opt_tab(tabs, "Sonido")
+	_opt_slider(gs, "Volumen general", "vol_master", 0.0, 1.0, 0.05, "%d %%", d)
+	_opt_slider(gs, "Efectos y armas", "vol_sfx", 0.0, 1.0, 0.05, "%d %%", d)
+	_opt_slider(gs, "Chat de voz", "vol_voice", 0.0, 1.0, 0.05, "%d %%", d)
+	# Gráficos
+	var gg := _opt_tab(tabs, "Gráficos")
+	gg.add_child(_label("Calidad (preajuste)", 17))
+	var qo := OptionButton.new()
+	for n in ["Baja", "Media", "Alta (iluminación global)"]:
+		qo.add_item(n)
+	qo.item_selected.connect(func(i):
+		game.quality_preset(i)
+		game.save_settings()
+		_sync_options()
+	)
+	gg.add_child(qo)
+	opt_ctrls["quality"] = [qo, [0, 1, 2]]
+	_opt_slider(gg, "Resolución 3D", "scale", 0.5, 1.0, 0.05, "%d %%", q)
+	_opt_choice(gg, "Sombras", "shadows", ["Desactivadas", "Normales", "Altas"], [0, 1, 2], q)
+	_opt_check(gg, "Resplandor (bloom)", "bloom", q)
+	_opt_check(gg, "Partículas de clima", "weather", q)
+	_opt_choice(gg, "Límite de FPS", "fps_cap", ["Sin límite", "30", "60", "90", "120"], [0, 30, 60, 90, 120], d)
+	_opt_check(gg, "Sincronización vertical", "vsync", d)
+	gg.add_child(_label("", 17))
+	_button(gg, "Optimizar para este PC", func():
+		game.optimize_for_pc()
+		_sync_options()
+	, true)
+	opt_gpu = _label("", 14, Color(0.8, 0.84, 0.82), 3)
+	opt_gpu.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	opt_gpu.custom_minimum_size = Vector2(740, 0)
+	vb.add_child(opt_gpu)
+	_button(vb, "Volver", func():
+		game.save_settings()
+		opt_p.visible = false
+		if opt_from_pause:
+			pause_p.visible = true
+		else:
+			show_menu()
+	)
+	opt_p.visible = false
+
+
+func show_options(from_pause: bool) -> void:
+	opt_from_pause = from_pause
+	menu.visible = false
+	pause_p.visible = false
+	opt_p.visible = true
+	_sync_options()
+	opt_gpu.text = "Tarjeta gráfica en uso: %s. Bajar la resolución 3D y las sombras es lo que más FPS da en gráficas integradas." % RenderingServer.get_video_adapter_name()
+
+
+func _sync_options() -> void:
+	for key in opt_ctrls:
+		var c: Array = opt_ctrls[key]
+		var v = game.settings.get(key)
+		if v == null:
+			continue
+		if c[0] is HSlider:
+			(c[0] as HSlider).set_value_no_signal(float(v))
+			var fmt: String = c[2]
+			(c[1] as Label).text = fmt % (float(v) * 100.0 if fmt.contains("%%") else float(v))
+		elif c[0] is CheckButton:
+			(c[0] as CheckButton).set_pressed_no_signal(bool(v))
+		elif c[0] is OptionButton:
+			(c[0] as OptionButton).select(maxi(0, (c[1] as Array).find(int(v))))
+
+
+# ---------------------------------------------------------------- ARMERO
+func _build_armory() -> void:
+	var tmp = load("res://scripts/player.gd").new()
+	arm_base = (tmp.weapons as Array).duplicate(true)
+	tmp.free()
+	arm_p = _overlay()
+	var vb: VBoxContainer = arm_p.get_meta("box")
+	vb.add_theme_constant_override("separation", 8)
+	var t := _label("ARMERO", 48, GOLD, 8)
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(t)
+	arm_credits = _label("", 20, GOLD, 4)
+	arm_credits.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(arm_credits)
+	var wrow := HBoxContainer.new()
+	wrow.alignment = BoxContainer.ALIGNMENT_CENTER
+	wrow.add_theme_constant_override("separation", 6)
+	vb.add_child(wrow)
+	for i in arm_base.size():
+		var b := _button(wrow, str(arm_base[i].short), func():
+			arm_wi = i
+			_refresh_armory(true)
+		, true)
+		b.custom_minimum_size = Vector2(150, 40)
+		b.add_theme_font_size_override("font_size", 16)
+		arm_btns.append(b)
+	# killstreaks: three picks + the nuke (always there)
+	arm_streaks = HBoxContainer.new()
+	arm_streaks.alignment = BoxContainer.ALIGNMENT_CENTER
+	arm_streaks.add_theme_constant_override("separation", 8)
+	vb.add_child(arm_streaks)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 22)
+	vb.add_child(row)
+	var left := VBoxContainer.new()
+	row.add_child(left)
+	var svc := SubViewportContainer.new()
+	svc.custom_minimum_size = Vector2(440, 250)
+	svc.stretch = true
+	left.add_child(svc)
+	arm_vp = SubViewport.new()
+	arm_vp.own_world_3d = true
+	arm_vp.size = Vector2i(440, 250)
+	arm_vp.msaa_3d = Viewport.MSAA_4X
+	arm_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
+	svc.add_child(arm_vp)
+	var we := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.07, 0.085, 0.085)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.6, 0.62, 0.65)
+	env.ambient_light_energy = 0.8
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.glow_enabled = true
+	we.environment = env
+	arm_vp.add_child(we)
+	var key := DirectionalLight3D.new()
+	key.rotation_degrees = Vector3(-40, 35, 0)
+	key.light_energy = 1.7
+	arm_vp.add_child(key)
+	var rim := DirectionalLight3D.new()
+	rim.rotation_degrees = Vector3(-15, 210, 0)
+	rim.light_energy = 1.0
+	rim.light_color = Color(0.7, 0.8, 1.0)
+	arm_vp.add_child(rim)
+	var cam := Camera3D.new()
+	cam.fov = 30.0
+	cam.near = 0.05
+	arm_vp.add_child(cam)
+	cam.look_at_from_position(Vector3(0, 0.25, 1.75), Vector3(0, 0, 0))
+	arm_stats = VBoxContainer.new()
+	arm_stats.add_theme_constant_override("separation", 3)
+	left.add_child(arm_stats)
+	var right := VBoxContainer.new()
+	right.custom_minimum_size = Vector2(470, 0)
+	right.add_theme_constant_override("separation", 8)
+	row.add_child(right)
+	arm_slots = VBoxContainer.new()
+	arm_slots.add_theme_constant_override("separation", 6)
+	right.add_child(arm_slots)
+	arm_msg = _label("", 15, Color(0.88, 0.9, 0.88), 3)
+	arm_msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	arm_msg.custom_minimum_size = Vector2(460, 44)
+	right.add_child(arm_msg)
+	_button(vb, "Listo", func():
+		game.save_settings()
+		show_menu()
+	)
+	arm_p.visible = false
+
+
+func show_armory() -> void:
+	menu.visible = false
+	arm_p.visible = true
+	arm_msg.text = "Gana créditos jugando (bajas, rondas y oleadas) y gástalos en accesorios, camuflajes y mejoras."
+	_refresh_armory(true)
+
+
+func _clear_arm_preview() -> void:
+	if arm_gun and is_instance_valid(arm_gun):
+		arm_gun.queue_free()
+	arm_gun = null
+	arm_gd = {}
+
+
+func _arm_build_gun(i: int) -> Dictionary:
+	WMS.no_hands = true
+	var d: Dictionary
+	match i:
+		0:
+			d = WMS.rifle()
+		1:
+			d = WMS.shotgun()
+		2:
+			d = WMS.pistol()
+		3:
+			d = WMS.smg()
+		4:
+			d = WMS.sniper()
+		_:
+			d = WMS.lmg()
+	WMS.no_hands = false
+	return d
+
+
+## Centre and size the preview gun from the bounds of its meshes (gun-local space).
+func _arm_frame() -> void:
+	var g: Node3D = arm_gd.model
+	var box := AABB()
+	var first := true
+	for mi in g.find_children("*", "MeshInstance3D", true, false):
+		if not (mi as MeshInstance3D).visible or mi == arm_gd.get("flash"):
+			continue
+		var xf: Transform3D = g.global_transform.affine_inverse() * (mi as MeshInstance3D).global_transform
+		var b: AABB = xf * (mi as MeshInstance3D).get_aabb()
+		box = b if first else box.merge(b)
+		first = false
+	if first:
+		return
+	var ln := maxf(box.size.z, 0.15)
+	g.position = -box.get_center()
+	(arm_gun as Node3D).scale = Vector3.ONE * minf(1.45 / ln, 4.0)
+
+
+func _arm_buy(cost: int) -> bool:
+	var cr := int(game.settings.get("credits", 0))
+	if cr < cost:
+		arm_msg.text = "No tienes créditos suficientes: necesitas %d y tienes %d." % [cost, cr]
+		game.sfx.play("deny", -4)
+		return false
+	game.settings.credits = cr - cost
+	game.sfx.play("buy", -4)
+	return true
+
+
+## RACHAS row of the ARMERO: three OptionButtons (sorted by kills) + the fixed nuke.
+func _refresh_streaks() -> void:
+	for ch in arm_streaks.get_children():
+		ch.queue_free()
+	arm_streaks.add_child(_label("RACHAS", 17, GOLD, 3))
+	var ids: Array = STK.DEFS.keys().filter(func(k): return k != "nuke")
+	var cur: Array = STK.chosen(game.settings)
+	cur.sort_custom(func(a, b): return int(STK.DEFS[a].kills) < int(STK.DEFS[b].kills))
+	for slot in 3:
+		var o := OptionButton.new()
+		o.custom_minimum_size = Vector2(230, 0)
+		o.add_theme_font_size_override("font_size", 15)
+		var opts: Array = []
+		for id in ids:
+			# a streak picked in another slot can't be picked twice
+			if id != cur[slot] and id in cur:
+				continue
+			opts.append(id)
+			o.add_item("%s  (%d)" % [STK.DEFS[id].name, int(STK.DEFS[id].kills)])
+		o.select(opts.find(cur[slot]))
+		o.tooltip_text = STK.DEFS[cur[slot]].desc
+		o.item_selected.connect(func(i):
+			var nw: Array = cur.duplicate()
+			nw[slot] = opts[i]
+			game.settings["streaks"] = nw
+			game.save_settings()
+			arm_msg.text = "%s (%d bajas seguidas): %s" % [STK.DEFS[opts[i]].name, int(STK.DEFS[opts[i]].kills), STK.DEFS[opts[i]].desc]
+			_refresh_streaks()
+		)
+		arm_streaks.add_child(o)
+	var nk := _label("+ Nuclear (30)", 15, Color(1.0, 0.55, 0.3), 3)
+	nk.tooltip_text = STK.DEFS.nuke.desc + " No disponible en Zombis."
+	nk.mouse_filter = Control.MOUSE_FILTER_PASS
+	arm_streaks.add_child(nk)
+
+
+func _refresh_armory(rebuild: bool) -> void:
+	var c: Dictionary = ARM.cfg(game.settings, arm_wi)
+	arm_credits.text = "Créditos: %d" % int(game.settings.get("credits", 0))
+	if rebuild:
+		_refresh_streaks()
+	for i in arm_btns.size():
+		var on: bool = i == arm_wi
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = GOLD if on else Color(0.23, 0.27, 0.25)
+		sb.set_corner_radius_all(6)
+		arm_btns[i].add_theme_stylebox_override("normal", sb)
+		arm_btns[i].add_theme_color_override("font_color", Color(0.1, 0.08, 0.02) if on else Color(0.92, 0.94, 0.93))
+	# 3D preview
+	if rebuild:
+		_clear_arm_preview()
+		arm_gd = _arm_build_gun(arm_wi)
+		var pivot := Node3D.new()
+		arm_vp.add_child(pivot)
+		var g: Node3D = arm_gd.model
+		pivot.add_child(g)
+		pivot.rotation.y = -PI / 2
+		arm_gun = pivot
+		if arm_gd.get("flash") is Node3D:
+			(arm_gd.flash as Node3D).visible = false
+	if not arm_gd.is_empty():
+		ARM.dress(arm_gd, arm_wi, c)
+		if arm_gd.get("flash") is Node3D:
+			(arm_gd.flash as Node3D).visible = false
+		if rebuild:
+			_arm_frame()
+	# stats: base bar + modified value
+	for ch in arm_stats.get_children():
+		ch.queue_free()
+	var w: Dictionary = (arm_base[arm_wi] as Dictionary).duplicate(true)
+	var base: Array = ARM.bars(w)
+	ARM.apply_stats(w, c, arm_wi)
+	var now: Array = ARM.bars(w)
+	arm_stats.add_child(_label("%s   ·   cargador %d   ·   reserva %d" % [w.name, int(w.mag), int(w.reserve_max)], 15, GOLD, 3))
+	for k in base.size():
+		var h := HBoxContainer.new()
+		var l := _label(str(base[k][0]), 14)
+		l.custom_minimum_size = Vector2(150, 0)
+		h.add_child(l)
+		var bg := ColorRect.new()
+		bg.color = Color(0.15, 0.17, 0.17)
+		bg.custom_minimum_size = Vector2(280, 12)
+		bg.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		h.add_child(bg)
+		var b0: float = base[k][1]
+		var b1: float = now[k][1]
+		var fill := ColorRect.new()
+		fill.color = Color(0.85, 0.86, 0.84)
+		fill.size = Vector2(280.0 * minf(b0, b1), 12)
+		bg.add_child(fill)
+		if absf(b1 - b0) > 0.005:
+			var diff := ColorRect.new()
+			diff.color = Color(0.35, 0.85, 0.35) if b1 > b0 else Color(0.9, 0.3, 0.25)
+			diff.position = Vector2(280.0 * minf(b0, b1), 0)
+			diff.size = Vector2(280.0 * absf(b1 - b0), 12)
+			bg.add_child(diff)
+		arm_stats.add_child(h)
+	# slots
+	for ch in arm_slots.get_children():
+		ch.queue_free()
+	for slot in ARM.SLOTS:
+		var ids := ["" ]
+		for id in ARM.ATT[slot]:
+			if ARM.slot_ok(slot, id, arm_wi):
+				ids.append(id)
+		if ids.size() == 1:
+			continue
+		var h := HBoxContainer.new()
+		var l := _label(ARM.SLOT_NAMES[slot], 16)
+		l.custom_minimum_size = Vector2(150, 0)
+		h.add_child(l)
+		var o := OptionButton.new()
+		o.custom_minimum_size = Vector2(310, 0)
+		var cur_id: String = c.att.get(slot, "")
+		for id in ids:
+			if id == "":
+				o.add_item("Ninguno")
+			else:
+				var a: Dictionary = ARM.ATT[slot][id]
+				o.add_item(a.name if ARM.owns(c, slot + ":" + id) else "%s  (%d cr)" % [a.name, int(a.cost)])
+		o.select(maxi(0, ids.find(cur_id)))
+		o.item_selected.connect(func(i):
+			var id: String = ids[i]
+			if id != "":
+				var a: Dictionary = ARM.ATT[slot][id]
+				if not ARM.owns(c, slot + ":" + id):
+					if not _arm_buy(int(a.cost)):
+						_refresh_armory(false)
+						return
+					c.own.append(slot + ":" + id)
+				arm_msg.text = "%s: %s" % [a.name, a.desc]
+			c.att[slot] = id
+			game.save_settings()
+			_refresh_armory(false)
+		)
+		h.add_child(o)
+		arm_slots.add_child(h)
+	# camo
+	var hc := HBoxContainer.new()
+	var lc := _label("Camuflaje", 16)
+	lc.custom_minimum_size = Vector2(150, 0)
+	hc.add_child(lc)
+	var oc := OptionButton.new()
+	oc.custom_minimum_size = Vector2(310, 0)
+	var camo_ids: Array = ARM.CAMOS.keys()
+	for id in camo_ids:
+		var cd: Dictionary = ARM.CAMOS[id]
+		oc.add_item(cd.name if (int(cd.cost) == 0 or ARM.owns(c, "camo:" + id)) else "%s  (%d cr)" % [cd.name, int(cd.cost)])
+	oc.select(maxi(0, camo_ids.find(str(c.camo))))
+	oc.item_selected.connect(func(i):
+		var id: String = camo_ids[i]
+		var cd: Dictionary = ARM.CAMOS[id]
+		if int(cd.cost) > 0 and not ARM.owns(c, "camo:" + id):
+			if not _arm_buy(int(cd.cost)):
+				_refresh_armory(false)
+				return
+			c.own.append("camo:" + id)
+		c.camo = id
+		arm_msg.text = "Camuflaje %s equipado." % cd.name
+		game.save_settings()
+		_refresh_armory(false)
+	)
+	hc.add_child(oc)
+	arm_slots.add_child(hc)
+	# upgrades
+	arm_slots.add_child(_label("MEJORAS", 17, GOLD, 3))
+	for uk in ARM.UPG:
+		var u: Dictionary = ARM.UPG[uk]
+		var lv := int(c.lvl.get(uk, 0))
+		var h := HBoxContainer.new()
+		var l := _label("%s  ·  nivel %d/%d" % [u.name, lv, ARM.MAX_LVL], 16)
+		l.custom_minimum_size = Vector2(230, 0)
+		l.tooltip_text = u.desc
+		h.add_child(l)
+		if lv < ARM.MAX_LVL:
+			var cost: int = ARM.UPG_COST[lv]
+			var b := _button(h, "Mejorar (%d cr)" % cost, func():
+				if _arm_buy(cost):
+					c.lvl[uk] = lv + 1
+					arm_msg.text = "%s mejorado a nivel %d: %s" % [u.name, lv + 1, u.desc]
+					game.save_settings()
+				_refresh_armory(false)
+			, true)
+			b.custom_minimum_size = Vector2(220, 34)
+			b.add_theme_font_size_override("font_size", 15)
+		else:
+			h.add_child(_label("Nivel máximo", 15, GOLD))
+		arm_slots.add_child(h)

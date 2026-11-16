@@ -383,7 +383,7 @@ func set_weather(kind: String) -> void:
 			w.queue_free()
 	weather.clear()
 	weather_kind = kind
-	if kind == "":
+	if kind == "" or w_quality < 0:   # -1 = weather particles turned off in OPCIONES
 		return
 	var mul: float = [0.5, 0.8, 1.0][w_quality]
 	match kind:
